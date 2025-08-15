@@ -3,7 +3,7 @@
     <!-- ✅ Permiso para usar Internet -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="fws_dashboard"
+        android:label="FWS Dashboard"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic= "true"> <!-- ✅ Permitir tráfico no seguro -->

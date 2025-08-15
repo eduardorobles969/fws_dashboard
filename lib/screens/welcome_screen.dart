@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+// ignore: unused_import
 import 'package:firebase_auth/firebase_auth.dart';
 
 class WelcomeScreen extends StatefulWidget {
@@ -41,18 +42,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
 
     // ⏳ Espera 3.5 segundos y navega según estado de autenticación
     Timer(const Duration(milliseconds: 3500), () {
-      final user = FirebaseAuth.instance.currentUser;
-
-      if (user == null) {
-        // ❌ No autenticado → Login
-        Navigator.pushReplacementNamed(context, '/login');
-      } else if (!user.emailVerified) {
-        // ❌ Autenticado pero no verificado → Perfil para verificar
-        Navigator.pushReplacementNamed(context, '/profile');
-      } else {
-        // ✅ Autenticado y verificado → Dashboard
-        Navigator.pushReplacementNamed(context, '/dashboard');
-      }
+      Navigator.pushReplacementNamed(context, '/auth');
     });
   }
 
