@@ -1,9 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.fws.dashboard">
+    <!-- ✅ Permiso para usar Internet -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="fws_dashboard"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic= "true"> <!-- ✅ Permitir tráfico no seguro -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

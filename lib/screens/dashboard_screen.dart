@@ -3,6 +3,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'profile_screen.dart'; // 👈 Importamos la pantalla de perfil
+import 'add_production_entry_screen.dart'; // 👈 Pantalla para agregar producción
+import 'documentation_screen.dart'; // 👈 Importamos la pantalla de documentación
 
 /// Modelo que representa un punto en la gráfica
 class ProductionPoint {
@@ -64,7 +66,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              accountEmail: const Text("Fusion Welding Solution"),
+              accountEmail: const Text("Fusion Welding Solutions"),
               currentAccountPicture: const CircleAvatar(
                 backgroundColor: Colors.white,
                 child: Icon(Icons.person, size: 36),
@@ -79,10 +81,54 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 if (mounted) Navigator.pop(context);
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.book),
+              title: const Text("Documentación"),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const DocumentationScreen(),
+                  ),
+                );
+              },
+            ),
+
+            // 📘 Aquí podrías agregar más opciones como:
+            // ListTile(
+            //   leading: Icon(Icons.book),
+            //   title: Text("Documentación"),
+            //   onTap: () { /* Navegar a documentación */ },
+            // ),
+            // ListTile(
+            //   leading: Icon(Icons.factory),
+            //   title: Text("Industria 4.0"),
+            //   onTap: () { /* Navegar a industria */ },
+            // ),
           ],
         ),
       ),
+
+      // 📊 Cuerpo principal: cambia según el índice seleccionado
       body: pages[_selectedIndex],
+
+      // ➕ FAB solo visible en la pestaña de tabla (índice 0)
+      floatingActionButton: _selectedIndex == 0
+          ? FloatingActionButton(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const AddProductionEntryScreen(),
+                  ),
+                );
+              },
+              tooltip: 'Agregar producción',
+              child: const Icon(Icons.add),
+            )
+          : null,
+
+      // 📌 Navegación inferior entre Tabla, Gráfica e Info
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: (i) => setState(() => _selectedIndex = i),
