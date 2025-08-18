@@ -96,11 +96,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
             // 📘 Aquí podrías agregar más opciones como:
             // ListTile(
-            //   leading: Icon(Icons.book),
-            //   title: Text("Documentación"),
-            //   onTap: () { /* Navegar a documentación */ },
-            // ),
-            // ListTile(
             //   leading: Icon(Icons.factory),
             //   title: Text("Industria 4.0"),
             //   onTap: () { /* Navegar a industria */ },

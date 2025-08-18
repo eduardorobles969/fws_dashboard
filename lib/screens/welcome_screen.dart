@@ -24,7 +24,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     _controller = AnimationController(
       duration: const Duration(seconds: 2),
       vsync: this,
-    );
+    )..repeat(); // ← esto hace que el destello se mueva continuamente
 
     // 🎭 Animación de opacidad
     _fadeAnimation = Tween<double>(
@@ -54,20 +54,31 @@ class _WelcomeScreenState extends State<WelcomeScreen>
 
   // ✨ Efecto de destello tipo soldadura
   Widget _buildShineEffect() {
-    return ShaderMask(
-      shaderCallback: (Rect bounds) {
-        return LinearGradient(
-          colors: [
-            Colors.white.withOpacity(0.0),
-            Colors.white.withOpacity(0.6),
-            Colors.white.withOpacity(0.0),
-          ],
-          stops: [0.0, 0.5, 1.0],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ).createShader(bounds);
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return ShaderMask(
+          shaderCallback: (Rect bounds) {
+            final animationValue = _controller.value;
+            return LinearGradient(
+              colors: [
+                Colors.white.withAlpha(0),
+                Colors.white.withAlpha(150),
+                Colors.white.withAlpha(0),
+              ],
+              stops: [
+                animationValue - 0.2,
+                animationValue,
+                animationValue + 0.2,
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ).createShader(bounds);
+          },
+          blendMode: BlendMode.srcATop,
+          child: child,
+        );
       },
-      blendMode: BlendMode.srcATop,
       child: Image.asset(
         'assets/icon.png',
         width: 180,
