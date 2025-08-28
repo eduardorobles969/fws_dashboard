@@ -4,11 +4,39 @@ import 'package:firebase_ui_auth/firebase_ui_auth.dart' hide ProfileScreen;
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'dashboard_screen.dart';
-import 'profile_screen.dart';
 
 /// Pantalla de login usando Firebase UI Auth
 class LoginScreen extends StatelessWidget {
   const LoginScreen({super.key});
+
+  Future<void> _ensureUserDoc(User user) async {
+    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final snap = await ref.get();
+
+    final base = {
+      'uid': user.uid,
+      'email': user.email ?? '',
+      'displayName': user.displayName ?? '',
+      'photoURL': user.photoURL ?? '',
+      'active': true,
+      'role': 'operador', // rol por defecto
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (!snap.exists) {
+      await ref.set({...base, 'createdAt': FieldValue.serverTimestamp()});
+    } else {
+      // Pequeño update para refrescar datos si cambian desde Auth
+      await ref.update(base);
+    }
+  }
+
+  void _goToDashboard(BuildContext context) {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const DashboardScreen()),
+      (route) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -17,7 +45,7 @@ class LoginScreen extends StatelessWidget {
     return SignInScreen(
       providers: providers,
 
-      // 🔹 Logo de la app
+      // Logo
       headerBuilder: (context, constraints, _) {
         return Padding(
           padding: const EdgeInsets.all(20),
@@ -29,52 +57,23 @@ class LoginScreen extends StatelessWidget {
         );
       },
 
-      // 🔹 Acciones al cambiar el estado de autenticación
       actions: [
-        // ✅ Usuario recién creado → Guardar en Firestore y redirigir a perfil
+        // Usuario recién creado
         AuthStateChangeAction<UserCreated>((context, state) async {
           final user = FirebaseAuth.instance.currentUser;
           if (user != null) {
-            final doc = FirebaseFirestore.instance
-                .collection('users')
-                .doc(user.uid);
-            await doc.set({
-              'email': user.email ?? '',
-              'displayName': user.displayName ?? '',
-              'photoURL': user.photoURL ?? '',
-              'createdAt': FieldValue.serverTimestamp(),
-            });
+            await _ensureUserDoc(user);
           }
-
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const ProfileScreen()),
-          );
+          _goToDashboard(context); // 👉 directo al dashboard
         }),
 
-        // ✅ Usuario existente → Verificar Firestore y redirigir al dashboard
+        // Usuario inició sesión (existente)
         AuthStateChangeAction<SignedIn>((context, state) async {
           final user = FirebaseAuth.instance.currentUser;
           if (user != null) {
-            final docRef = FirebaseFirestore.instance
-                .collection('users')
-                .doc(user.uid);
-            final doc = await docRef.get();
-
-            if (!doc.exists) {
-              await docRef.set({
-                'email': user.email ?? '',
-                'displayName': user.displayName ?? '',
-                'photoURL': user.photoURL ?? '',
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-            }
+            await _ensureUserDoc(user);
           }
-
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const DashboardScreen()),
-          );
+          _goToDashboard(context); // 👉 directo al dashboard
         }),
       ],
     );

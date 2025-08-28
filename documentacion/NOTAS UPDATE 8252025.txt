@@ -1,0 +1,47 @@
+inicio
+fin
+
+diseño seria sube información (de donde subirá la información)
+planeación 
+manufactura (Asigna trabajo) recibe alerta de scrap.
+operadores ( consultar y recibir alertas) incio y fin al proyecto, verán pdf, edrawin, solido.
+
+diagrama de flujo.
+
+usuarios = programadores y operadores
+que elija el equipo el operador o el.
+
+
+estado de solicitud de material.
+
+cuellos de botella.
+
+5s de orden de bins
+
+
+BOTON PARA "upload_desing.dart" = (Departamento diseño dará de alta proyecto)
+
+- QUe se haga un Gantt de producción por persona en base al "add_production_entry_screen.dart". 
+(Nota: Que ese Gantt tenga restricción de orden de producción, 
+
+
+
+CREAR APARTADO DE "STOCK DE MATERIALES"
+	WHAREHOUSE LOGIC Y DIGITAL (BINES CON QR)
+
+
+Crear interfaz de ASSY : Saber cuando dar greenlight a Assy en base al Gantt de producción que se definio.
+
+
+
+APARTADO DE GANTT. Definir ingreso de planeación. apartado de planeación. toma de decisiones en prioridad en base a retro de diseño.
+
+
+1.- Adaptar 
+
+
+
+(pdf
+tsf
+parasolido)
+
