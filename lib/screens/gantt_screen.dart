@@ -2,40 +2,184 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-/// Gantt de producción
-/// Jerarquía: Proyecto > Nº de parte > Operación
-/// Campos usados por doc en `production_daily`:
-/// - proyecto (String), numeroParte (String), operacionNombre (String)
-/// - planInicio (Timestamp?) / planFin (Timestamp?)   <-- preferente
-/// - fecha (Timestamp?) / fechaCompromiso (Timestamp?) <-- fallback plan
-/// - inicio (Timestamp?) / fin (Timestamp?)           <-- real
-/// - opSecuencia (int?)                               <-- orden dentro del P/N
 class GanttScreen extends StatefulWidget {
   const GanttScreen({super.key});
-
   @override
   State<GanttScreen> createState() => _GanttScreenState();
 }
 
 class _GanttScreenState extends State<GanttScreen> {
-  // Tamaños base (pueden escalarse con _scale)
-  static const double _baseRowH = 32;
-  static const double _baseDayW = 32;
+  // Zoom (ancho de un día) y ancho del panel izquierdo
+  double _dayW = 28;
+  double _labelsW = 260;
 
-  double _scale = 1.0; // 0.5 .. 2.0
+  String? _selectedProject;
 
-  double get _rowH => _baseRowH * _scale;
-  double get _dayW => _baseDayW * _scale;
+  // Scrolls sincronizados
+  final _hHeader = ScrollController();
+  final _hBody = ScrollController();
+  final _vLabels = ScrollController();
+  final _vBody = ScrollController();
+
+  // Flags para evitar bucles de sincronización
+  bool _syncHFromHeader = false, _syncHFromBody = false;
+  bool _syncVFromLabels = false, _syncVFromBody = false;
+
+  // Para “Ir a hoy”
+  DateTime? _lastMinD;
+  double _lastCanvasW = 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // --- Horizontal: BIDIRECCIONAL ---
+    _hBody.addListener(() {
+      if (_syncHFromHeader) return;
+      _syncHFromBody = true;
+      if (_hHeader.hasClients && _hHeader.offset != _hBody.offset) {
+        _hHeader.jumpTo(_hBody.offset);
+      }
+      _syncHFromBody = false;
+    });
+
+    _hHeader.addListener(() {
+      if (_syncHFromBody) return;
+      _syncHFromHeader = true;
+      if (_hBody.hasClients && _hBody.offset != _hHeader.offset) {
+        _hBody.jumpTo(_hHeader.offset);
+      }
+      _syncHFromHeader = false;
+    });
+
+    // --- Vertical: BIDIRECCIONAL ---
+    _vLabels.addListener(() {
+      if (_syncVFromBody) return;
+      _syncVFromLabels = true;
+      if (_vBody.hasClients && _vBody.offset != _vLabels.offset) {
+        _vBody.jumpTo(_vLabels.offset);
+      }
+      _syncVFromLabels = false;
+    });
+
+    _vBody.addListener(() {
+      if (_syncVFromLabels) return;
+      _syncVFromBody = true;
+      if (_vLabels.hasClients && _vLabels.offset != _vBody.offset) {
+        _vLabels.jumpTo(_vBody.offset);
+      }
+      _syncVFromBody = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _hHeader.dispose();
+    _hBody.dispose();
+    _vLabels.dispose();
+    _vBody.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final q = FirebaseFirestore.instance
-        .collection('production_daily')
-        .orderBy('proyecto')
-        .orderBy('numeroParte'); // ⚠️ requiere índice compuesto
+    // Query base
+    Query<Map<String, dynamic>> q = FirebaseFirestore.instance.collection(
+      'production_daily',
+    );
+
+    if (_selectedProject != null && _selectedProject!.isNotEmpty) {
+      q = q.where('proyecto', isEqualTo: _selectedProject);
+    }
+    q = q.orderBy('proyecto').orderBy('numeroParte');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Gantt de producción')),
+      appBar: AppBar(
+        title: const Text('Gantt de producción'),
+        actions: [
+          IconButton(
+            tooltip: _labelsW > 80 ? 'Colapsar panel' : 'Expandir panel',
+            icon: Icon(
+              _labelsW > 80 ? Icons.chevron_left : Icons.chevron_right,
+            ),
+            onPressed: () =>
+                setState(() => _labelsW = _labelsW > 80 ? 56 : 260),
+          ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(56),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Row(
+              children: [
+                // Filtro por proyecto
+                Expanded(
+                  child: StreamBuilder<QuerySnapshot>(
+                    stream: FirebaseFirestore.instance
+                        .collection('projects')
+                        .where('activo', isEqualTo: true)
+                        .orderBy('proyecto')
+                        .snapshots(),
+                    builder: (context, snap) {
+                      final items = snap.data?.docs ?? const [];
+                      return DropdownButtonFormField<String>(
+                        value: _selectedProject,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Filtrar por proyecto',
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
+                        items: [
+                          const DropdownMenuItem(
+                            value: null,
+                            child: Text('Todos'),
+                          ),
+                          ...items.map((d) {
+                            final name = (d['proyecto'] ?? '') as String;
+                            return DropdownMenuItem(
+                              value: name,
+                              child: Text(
+                                name,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }),
+                        ],
+                        onChanged: (v) => setState(() => _selectedProject = v),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Zoom
+                SizedBox(
+                  width: 170,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.zoom_out, size: 18),
+                      Expanded(
+                        child: Slider(
+                          min: 16,
+                          max: 48,
+                          divisions: 16,
+                          value: _dayW,
+                          onChanged: (v) => setState(() => _dayW = v),
+                        ),
+                      ),
+                      const Icon(Icons.zoom_in, size: 18),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: q.snapshots(),
         builder: (context, snap) {
@@ -47,132 +191,304 @@ class _GanttScreenState extends State<GanttScreen> {
           }
 
           final docs = snap.data!.docs;
-          if (docs.isEmpty) {
-            return const Center(child: Text('Sin datos.'));
-          }
+          if (docs.isEmpty) return const Center(child: Text('Sin datos.'));
 
-          // ---- Agrupar: proyecto > parte > lista de operaciones (con fechas calculadas)
-          final grouped = <String, Map<String, List<_OpItem>>>{};
-          DateTime? minD;
-          DateTime? maxD;
+          // ===== 1) Agrupar Proyecto → Parte → Operaciones
+          final grouped = <String, Map<String, List<Map<String, dynamic>>>>{};
+          DateTime? minD, maxD;
 
           for (final d in docs) {
             final m = d.data();
+            final proyecto = (m['proyecto'] ?? '—') as String;
+            final parte = (m['numeroParte'] ?? '—') as String;
 
-            final p = (m['proyecto'] ?? '—').toString();
-            final pn = (m['numeroParte'] ?? '—').toString();
             final opName = (m['operacionNombre'] ?? m['operacion'] ?? '—')
                 .toString();
+            final sec = (m['opSecuencia'] ?? 9999) as int;
 
-            final planInicio =
-                (m['planInicio'] as Timestamp?)?.toDate() ??
-                (m['fecha'] as Timestamp?)?.toDate();
-
-            final planFin =
-                (m['planFin'] as Timestamp?)?.toDate() ??
+            // Plan
+            final DateTime? planStart = (m['fecha'] as Timestamp?)?.toDate();
+            final DateTime? planEnd =
                 (m['fechaCompromiso'] as Timestamp?)?.toDate() ??
-                (planInicio != null
-                    ? planInicio.add(const Duration(days: 1))
-                    : null);
+                (planStart?.add(const Duration(days: 1)));
 
-            final realInicio = (m['inicio'] as Timestamp?)?.toDate();
-            final realFin = (m['fin'] as Timestamp?)?.toDate();
-
-            final sec = (m['opSecuencia'] is int)
-                ? (m['opSecuencia'] as int)
-                : int.tryParse('${m['opSecuencia'] ?? ''}') ?? 9999;
-
-            // Extremos del rango para cabecera/scroll
-            for (final dt in [planInicio, planFin, realInicio, realFin]) {
-              if (dt == null) continue;
-              minD = (minD == null || dt.isBefore(minD!)) ? dt : minD;
-              maxD = (maxD == null || dt.isAfter(maxD!)) ? dt : maxD;
+            // Real
+            final DateTime? realStart = (m['inicio'] as Timestamp?)?.toDate();
+            DateTime? realEnd = (m['fin'] as Timestamp?)?.toDate();
+            if (realStart != null && realEnd == null) {
+              final now = DateTime.now();
+              realEnd = now.isBefore(realStart) ? realStart : now;
             }
 
-            grouped.putIfAbsent(p, () => {});
-            grouped[p]!.putIfAbsent(pn, () => []);
-            grouped[p]![pn]!.add(
-              _OpItem(
-                secuencia: sec,
-                op: opName,
-                planStart: planInicio,
-                planEnd: planFin,
-                realStart: realInicio,
-                realEnd: realFin,
-              ),
-            );
+            for (final dt in [planStart, planEnd, realStart, realEnd]) {
+              if (dt == null) continue;
+              minD = (minD == null || dt.isBefore(minD)) ? dt : minD;
+              maxD = (maxD == null || dt.isAfter(maxD)) ? dt : maxD;
+            }
+
+            grouped.putIfAbsent(proyecto, () => {});
+            grouped[proyecto]!.putIfAbsent(parte, () => []);
+            grouped[proyecto]![parte]!.add({
+              'op': opName,
+              'opSecuencia': sec,
+              'planStart': planStart,
+              'planEnd': planEnd,
+              'realStart': realStart,
+              'realEnd': realEnd,
+            });
           }
 
-          // Rango por defecto si faltara algo
+          // Rango visible
           minD ??= DateTime.now();
           maxD ??= DateTime.now().add(const Duration(days: 7));
+          minD = DateTime(minD.year, minD.month, minD.day);
+          maxD = DateTime(maxD.year, maxD.month, maxD.day);
 
-          // Normaliza a medianoche para un grid “por día”
-          minD = DateTime(minD!.year, minD!.month, minD!.day);
-          maxD = DateTime(maxD!.year, maxD!.month, maxD!.day);
+          final totalDays = max(1, maxD.difference(minD).inDays + 1);
+          final canvasWidth = totalDays * _dayW;
 
-          final totalDays = max(1, maxD!.difference(minD!).inDays + 1);
-          final fullWidth = totalDays * _dayW;
+          // Guardar para “Ir a hoy”
+          _lastMinD = minD;
+          _lastCanvasW = canvasWidth;
 
-          // Ordena por secuencia dentro de cada parte
-          grouped.forEach((_, parts) {
-            parts.forEach((__, ops) {
-              ops.sort((a, b) {
-                final bySeq = a.secuencia.compareTo(b.secuencia);
-                if (bySeq != 0) return bySeq;
-                final aStart = a.planStart ?? DateTime(2100);
-                final bStart = b.planStart ?? DateTime(2100);
-                return aStart.compareTo(bStart);
-              });
+          // ===== 2) Orden “escalera” (proy/parte por su primera fecha)
+          DateTime? firstOfOps(List<Map<String, dynamic>> ops) {
+            DateTime? out;
+            for (final o in ops) {
+              final p = o['planStart'] as DateTime?;
+              final r = o['realStart'] as DateTime?;
+              final c = p ?? r;
+              if (c == null) continue;
+              if (out == null || c.isBefore(out)) out = c;
+            }
+            return out;
+          }
+
+          final projectEntries = grouped.entries.toList()
+            ..sort((a, b) {
+              DateTime? aMin, bMin;
+              for (final ops in a.value.values) {
+                final f = firstOfOps(ops);
+                if (f != null) {
+                  aMin = (aMin == null || f.isBefore(aMin)) ? f : aMin;
+                }
+              }
+              for (final ops in b.value.values) {
+                final f = firstOfOps(ops);
+                if (f != null) {
+                  bMin = (bMin == null || f.isBefore(bMin)) ? f : bMin;
+                }
+              }
+              return (aMin ?? DateTime(2100)).compareTo(bMin ?? DateTime(2100));
             });
-          });
 
+          final rows = <_Row>[];
+          for (final projEntry in projectEntries) {
+            final project = projEntry.key;
+            final parts = projEntry.value;
+
+            rows.add(_Row.project(project));
+
+            final partEntries = parts.entries.toList()
+              ..sort((a, b) {
+                final af = firstOfOps(a.value) ?? DateTime(2100);
+                final bf = firstOfOps(b.value) ?? DateTime(2100);
+                return af.compareTo(bf);
+              });
+
+            for (final partEntry in partEntries) {
+              final pn = partEntry.key;
+              final ops = List<Map<String, dynamic>>.from(partEntry.value)
+                ..sort(
+                  (a, b) => (a['opSecuencia'] as int).compareTo(
+                    b['opSecuencia'] as int,
+                  ),
+                );
+
+              rows.add(_Row.part(project, pn));
+              for (final op in ops) {
+                rows.add(
+                  _Row.operation(
+                    project: project,
+                    part: pn,
+                    label: '[${op['opSecuencia']}] ${op['op']}',
+                    planStart: op['planStart'] as DateTime?,
+                    planEnd: op['planEnd'] as DateTime?,
+                    realStart: op['realStart'] as DateTime?,
+                    realEnd: op['realEnd'] as DateTime?,
+                  ),
+                );
+              }
+            }
+          }
+
+          // ===== 3) UI
           return Column(
             children: [
-              // Zoom
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.zoom_out),
-                    Expanded(
-                      child: Slider(
-                        value: _scale,
-                        min: 0.5,
-                        max: 2.0,
-                        divisions: 15,
-                        label: '${(_scale * 100).round()}%',
-                        onChanged: (v) => setState(() => _scale = v),
+              // Header: título panel izquierdo + días
+              Row(
+                children: [
+                  SizedBox(
+                    width: _labelsW,
+                    child: Container(
+                      height: 40,
+                      alignment: Alignment.centerLeft,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      color: Colors.grey.shade100,
+                      child: const Text(
+                        'Proyecto / Parte / Operación',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    const Icon(Icons.zoom_in),
-                  ],
-                ),
+                  ),
+                  Expanded(
+                    child: SizedBox(
+                      height: 40,
+                      child: Stack(
+                        children: [
+                          // El header no acepta gestos; sigue el offset del cuerpo
+                          ListView.builder(
+                            controller: _hHeader,
+                            scrollDirection: Axis.horizontal,
+                            physics:
+                                const NeverScrollableScrollPhysics(), // fijo
+                            itemCount: totalDays,
+                            itemBuilder: (_, i) {
+                              final d = minD!.add(Duration(days: i));
+                              return Container(
+                                width: _dayW,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  border: Border(
+                                    right: BorderSide(
+                                      color: Colors.grey.shade300,
+                                      width: 1,
+                                    ),
+                                  ),
+                                ),
+                                child: Text(
+                                  '${d.month}/${d.day}',
+                                  style: const TextStyle(fontSize: 11),
+                                ),
+                              );
+                            },
+                          ),
+                          // Línea de Hoy en HEADER: resta offset del cuerpo
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: AnimatedBuilder(
+                                animation: _hBody,
+                                builder: (_, __) {
+                                  final int idx = DateTime.now()
+                                      .difference(minD!)
+                                      .inDays;
+                                  final double left =
+                                      idx * _dayW -
+                                      (_hBody.hasClients ? _hBody.offset : 0.0);
+                                  return Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Transform.translate(
+                                      offset: Offset(left, 0),
+                                      child: Container(
+                                        width: 2,
+                                        color: Colors.deepOrange,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-
-              // Cabecera de días
-              _headerDays(minD!, totalDays),
-
               const Divider(height: 1),
 
-              // Lienzo
+              // Cuerpo: etiquetas + canvas
               Expanded(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Columna izquierda fija (etiquetas)
-                    SizedBox(width: 320, child: _labelsPane(grouped)),
-                    const VerticalDivider(width: 1),
-                    // Barras con scroll horizontal
+                    // Etiquetas
+                    SizedBox(
+                      width: _labelsW,
+                      child: ListView.builder(
+                        controller: _vLabels,
+                        itemCount: rows.length,
+                        itemBuilder: (_, i) {
+                          final r = rows[i];
+                          switch (r.type) {
+                            case _RowType.project:
+                              return _labelProject(r.project!);
+                            case _RowType.part:
+                              return _labelPart(r.part!);
+                            case _RowType.operation:
+                              return _labelOp(r.label!);
+                          }
+                        },
+                      ),
+                    ),
+                    // Canvas + línea de Hoy (continua sobre TODO el timeline)
                     Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: SizedBox(
-                          width: fullWidth,
-                          child: _barsPane(grouped, minD!, totalDays),
+                      child: Scrollbar(
+                        child: SingleChildScrollView(
+                          controller: _hBody,
+                          scrollDirection: Axis.horizontal,
+                          child: SizedBox(
+                            width: canvasWidth,
+                            child: Stack(
+                              children: [
+                                ListView.builder(
+                                  controller: _vBody,
+                                  itemCount: rows.length,
+                                  itemBuilder: (_, i) {
+                                    final r = rows[i];
+                                    if (r.type != _RowType.operation) {
+                                      return _rowSeparator(r.type);
+                                    }
+                                    return _barsRow(
+                                      minStart: minD!,
+                                      totalDays: totalDays,
+                                      dayW: _dayW,
+                                      planStart: r.planStart,
+                                      planEnd: r.planEnd,
+                                      realStart: r.realStart,
+                                      realEnd: r.realEnd,
+                                    );
+                                  },
+                                ),
+                                // Línea de Hoy en CUERPO: NO restar offset (el contenido ya scrollea)
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: AnimatedBuilder(
+                                      animation: _hBody,
+                                      builder: (_, __) {
+                                        final idx = DateTime.now()
+                                            .difference(minD!)
+                                            .inDays;
+                                        final left =
+                                            idx * _dayW; // <- sin offset
+                                        return Align(
+                                          alignment: Alignment.topLeft,
+                                          child: Transform.translate(
+                                            offset: Offset(left, 0),
+                                            child: Container(
+                                              width: 2,
+                                              color: Colors.deepOrange,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -187,169 +503,75 @@ class _GanttScreenState extends State<GanttScreen> {
           );
         },
       ),
-    );
-  }
 
-  // ---------- Cabecera de días ----------
-  Widget _headerDays(DateTime start, int total) {
-    return SizedBox(
-      height: max(36, 28 * _scale),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: List.generate(total, (i) {
-            final d = start.add(Duration(days: i));
-            final text = '${d.month}/${d.day}';
-            final isToday = _isSameDay(d, DateTime.now());
-            return Container(
-              alignment: Alignment.center,
-              width: _dayW,
-              decoration: BoxDecoration(
-                color: isToday ? Colors.red.withOpacity(0.05) : null,
-                border: Border(
-                  right: BorderSide(color: Colors.grey.shade300, width: 1),
-                ),
-              ),
-              child: Text(
-                text,
-                style: TextStyle(
-                  fontSize: max(10, 11 * _scale),
-                  fontWeight: isToday ? FontWeight.w600 : FontWeight.w400,
-                  color: isToday ? Colors.red.shade400 : null,
-                ),
-              ),
-            );
-          }),
-        ),
+      floatingActionButton: FloatingActionButton.extended(
+        icon: const Icon(Icons.today),
+        label: const Text('Ir a hoy'),
+        onPressed: _scrollToToday,
       ),
     );
   }
 
-  // ---------- Panel de etiquetas izquierdo ----------
-  Widget _labelsPane(Map<String, Map<String, List<_OpItem>>> g) {
-    final rows = <Widget>[];
-    g.forEach((project, parts) {
-      rows.add(
-        Container(
-          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-          color: Colors.grey.shade100,
-          child: Text(
-            project,
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-        ),
-      );
-      parts.forEach((pn, ops) {
-        rows.add(
-          Container(
-            height: _rowH,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            alignment: Alignment.centerLeft,
-            child: Text('• $pn', overflow: TextOverflow.ellipsis),
-          ),
-        );
-        for (final op in ops) {
-          rows.add(
-            Container(
-              height: _rowH,
-              padding: const EdgeInsets.only(left: 16, right: 8),
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '   └ [${op.secuencia}] ${op.op}',
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          );
-        }
-      });
-    });
-    return ListView(children: rows);
-  }
+  // ===== Etiquetas y separadores =====
+  Widget _labelProject(String project) => Container(
+    height: 32,
+    color: Colors.grey.shade100,
+    alignment: Alignment.centerLeft,
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    child: Text(project, style: const TextStyle(fontWeight: FontWeight.bold)),
+  );
 
-  // ---------- Panel de barras ----------
-  Widget _barsPane(
-    Map<String, Map<String, List<_OpItem>>> g,
-    DateTime start,
-    int totalDays,
-  ) {
-    final rows = <Widget>[];
-    g.forEach((project, parts) {
-      rows.add(
-        Container(
-          height: max(28, 24 * _scale),
-          color: Colors.grey.shade100,
-          alignment: Alignment.centerLeft,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Text(
-            project,
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-        ),
-      );
+  Widget _labelPart(String pn) => Container(
+    height: 26,
+    alignment: Alignment.centerLeft,
+    padding: const EdgeInsets.symmetric(horizontal: 12),
+    child: Text('• $pn', overflow: TextOverflow.ellipsis),
+  );
 
-      parts.forEach((pn, ops) {
-        // Fila vacía separadora del P/N
-        rows.add(
-          Container(
-            height: _rowH,
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
-            ),
-          ),
-        );
+  Widget _labelOp(String label) => Container(
+    height: 28,
+    alignment: Alignment.centerLeft,
+    padding: const EdgeInsets.only(left: 28, right: 8),
+    child: Text(
+      label,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 12),
+    ),
+  );
 
-        for (final op in ops) {
-          rows.add(
-            _ganttRow(
-              start: start,
-              totalDays: totalDays,
-              dayW: _dayW,
-              rowH: _rowH,
-              planStart: op.planStart,
-              planEnd: op.planEnd,
-              realStart: op.realStart,
-              realEnd: op.realEnd,
-            ),
-          );
-        }
-      });
-    });
-
-    return Stack(
-      children: [
-        ListView(children: rows),
-        // Línea de hoy superpuesta
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: _TodayPainter(start: start, dayW: _dayW),
-            ),
-          ),
-        ),
-      ],
+  Widget _rowSeparator(_RowType t) {
+    final h = switch (t) {
+      _RowType.project => 32.0,
+      _RowType.part => 26.0,
+      _RowType.operation => 28.0,
+    };
+    return Container(
+      height: h,
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+      ),
     );
   }
 
-  /// Dibuja una fila con barra plan (clara) y real (oscura)
-  Widget _ganttRow({
-    required DateTime start,
+  // ===== Barras =====
+  Widget _barsRow({
+    required DateTime minStart,
     required int totalDays,
     required double dayW,
-    required double rowH,
     DateTime? planStart,
     DateTime? planEnd,
     DateTime? realStart,
     DateTime? realEnd,
   }) {
-    double leftOf(DateTime d) => d.difference(start).inDays * dayW;
+    double leftOf(DateTime d) => d.difference(minStart).inDays * dayW;
     double widthOf(DateTime a, DateTime b) =>
         max(dayW * 0.8, (b.difference(a).inDays + 1) * dayW - 2);
 
-    final stackChildren = <Widget>[];
+    final children = <Widget>[];
 
-    // Grid vertical tenue
+    // Grid vertical sutil
     for (int i = 0; i < totalDays; i++) {
-      stackChildren.add(
+      children.add(
         Positioned(
           left: i * dayW,
           top: 0,
@@ -361,16 +583,16 @@ class _GanttScreenState extends State<GanttScreen> {
 
     // Plan
     if (planStart != null && planEnd != null && !planEnd.isBefore(planStart)) {
-      stackChildren.add(
+      children.add(
         Positioned(
           left: leftOf(planStart),
-          top: max(4, 3 * _scale),
+          top: 8,
           child: Container(
             width: widthOf(planStart, planEnd),
-            height: max(10, 8 * _scale),
+            height: 8,
             decoration: BoxDecoration(
               color: Colors.blue.shade200,
-              borderRadius: BorderRadius.circular(4),
+              borderRadius: BorderRadius.circular(3),
             ),
           ),
         ),
@@ -379,48 +601,44 @@ class _GanttScreenState extends State<GanttScreen> {
 
     // Real
     if (realStart != null && realEnd != null && !realEnd.isBefore(realStart)) {
-      stackChildren.add(
+      children.add(
         Positioned(
           left: leftOf(realStart),
-          top: max(10, 9 * _scale),
+          top: 15,
           child: Container(
             width: widthOf(realStart, realEnd),
-            height: max(12, 10 * _scale),
+            height: 10,
             decoration: BoxDecoration(
               color: Colors.blue.shade700,
-              borderRadius: BorderRadius.circular(4),
+              borderRadius: BorderRadius.circular(3),
             ),
           ),
         ),
       );
     }
 
-    return SizedBox(
-      height: rowH,
-      child: Stack(children: stackChildren),
-    );
+    return SizedBox(height: 28, child: Stack(children: children));
   }
 
-  Widget _legend() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        children: [
-          _box(Colors.blue.shade200),
-          const SizedBox(width: 6),
-          const Text('Plan'),
-          const SizedBox(width: 16),
-          _box(Colors.blue.shade700),
-          const SizedBox(width: 6),
-          const Text('Real'),
-          const SizedBox(width: 16),
-          Container(width: 18, height: 2, color: Colors.red),
-          const SizedBox(width: 6),
-          const Text('Hoy'),
-        ],
-      ),
-    );
-  }
+  // ===== Leyenda =====
+  Widget _legend() => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    child: Row(
+      children: [
+        _box(Colors.blue.shade200),
+        const SizedBox(width: 6),
+        const Text('Plan'),
+        const SizedBox(width: 16),
+        _box(Colors.blue.shade700),
+        const SizedBox(width: 6),
+        const Text('Real'),
+        const SizedBox(width: 16),
+        Container(width: 12, height: 2, color: Colors.deepOrange),
+        const SizedBox(width: 6),
+        const Text('Hoy'),
+      ],
+    ),
+  );
 
   Widget _box(Color c) => Container(
     width: 18,
@@ -428,53 +646,62 @@ class _GanttScreenState extends State<GanttScreen> {
     decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(2)),
   );
 
-  bool _isSameDay(DateTime a, DateTime b) =>
-      a.year == b.year && a.month == b.month && a.day == b.day;
-}
+  // ===== Scroll a “Hoy” (centra la vista horizontal)
+  void _scrollToToday() {
+    final minD = _lastMinD;
+    if (minD == null) return;
 
-// ---------- Model interno de una operación ----------
-class _OpItem {
-  final int secuencia;
-  final String op;
-  final DateTime? planStart;
-  final DateTime? planEnd;
-  final DateTime? realStart;
-  final DateTime? realEnd;
+    final now = DateTime.now();
+    final base = DateTime(now.year, now.month, now.day);
+    final int idx = base.difference(minD).inDays;
 
-  _OpItem({
-    required this.secuencia,
-    required this.op,
-    required this.planStart,
-    required this.planEnd,
-    required this.realStart,
-    required this.realEnd,
-  });
-}
+    final double viewW = MediaQuery.of(context).size.width - _labelsW;
+    final double maxScroll = max(0.0, _lastCanvasW - viewW);
 
-// ---------- Painter línea de “hoy” ----------
-class _TodayPainter extends CustomPainter {
-  final DateTime start;
-  final double dayW;
+    final double target = (idx * _dayW - viewW / 2).clamp(0.0, maxScroll);
 
-  _TodayPainter({required this.start, required this.dayW});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final today = DateTime.now();
-    final d0 = DateTime(start.year, start.month, start.day);
-    final d1 = DateTime(today.year, today.month, today.day);
-
-    final days = d1.difference(d0).inDays;
-    if (days < 0) return;
-
-    final x = days * dayW + dayW / 2;
-    final paint = Paint()
-      ..color = Colors.red.withOpacity(0.6)
-      ..strokeWidth = 2;
-    canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    if (_hBody.hasClients) {
+      _hBody.animateTo(
+        target,
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeOut,
+      );
+    }
   }
+}
 
-  @override
-  bool shouldRepaint(covariant _TodayPainter oldDelegate) =>
-      oldDelegate.start != start || oldDelegate.dayW != dayW;
+// ===== Modelo interno de filas =====
+enum _RowType { project, part, operation }
+
+class _Row {
+  final _RowType type;
+  final String? project, part, label;
+  final DateTime? planStart, planEnd, realStart, realEnd;
+
+  _Row.project(this.project)
+    : type = _RowType.project,
+      part = null,
+      label = null,
+      planStart = null,
+      planEnd = null,
+      realStart = null,
+      realEnd = null;
+
+  _Row.part(this.project, this.part)
+    : type = _RowType.part,
+      label = null,
+      planStart = null,
+      planEnd = null,
+      realStart = null,
+      realEnd = null;
+
+  _Row.operation({
+    required this.project,
+    required this.part,
+    required this.label,
+    this.planStart,
+    this.planEnd,
+    this.realStart,
+    this.realEnd,
+  }) : type = _RowType.operation;
 }

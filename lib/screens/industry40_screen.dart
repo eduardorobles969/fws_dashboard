@@ -441,7 +441,7 @@ Widget _stateDot(bool on) {
 String _fmtTs(dynamic ts) {
   if (ts is Timestamp) {
     final d = ts.toDate();
-    final two = (int n) => n.toString().padLeft(2, '0');
+    two(int n) => n.toString().padLeft(2, '0');
     return '${two(d.day)}/${two(d.month)}/${d.year} '
         '${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
   }

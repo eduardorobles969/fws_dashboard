@@ -1,10 +1,19 @@
+import 'dart:io' show File;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
 
 /// Alta de proyecto y carga masiva de números de parte.
-/// - Puede crear un proyecto nuevo o agregar partes a uno existente.
-/// - Permite pegar una lista masiva ("PN | Descripción" separados por coma, tab o barra vertical).
-/// - Normaliza PN, evita duplicados (internos y contra Firestore) y guarda en batch.
+/// - Puede crear proyecto nuevo o agregar partes a uno existente.
+/// - Pegar lista masiva: "PN | Descripción" (o coma, TAB, solo PN)
+/// - Cada parte ahora trae:
+///   * cantidadPlan (BOM)
+///   * plano (jpg/pdf)
+///   * sólidos (x_t/step, múltiples)
+/// - Archivos se suben a Storage y se guardan sus URLs en el doc.
 class NewProjectPartScreen extends StatefulWidget {
   const NewProjectPartScreen({super.key});
 
@@ -67,9 +76,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 
   /// Intenta parsear varias líneas pegadas: "PN[,| | \t | |] Descripción"
-  /// Acepta:  CHM-1022-C1842 | COPLE 42MM X 18
-  ///          FVF-0100-HF1-010, HERRAMIENTAL FRANKLIN 1
-  ///          ABC123<TAB>Base izquierda
   List<_ParsedLine> _parseBulk(String raw) {
     final lines = raw.split('\n');
     final out = <_ParsedLine>[];
@@ -101,6 +107,34 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     return out;
   }
 
+  // =================== STORAGE ===================
+
+  Future<String> _uploadFile({
+    required String projectId,
+    required String partDocId,
+    required PlatformFile file,
+    required String kind, // 'drawing' | 'solid'
+  }) async {
+    final storage = FirebaseStorage.instance;
+    final ext = (file.extension ?? '').toLowerCase();
+    final safeName = (file.name).replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
+
+    final path =
+        'projects/$projectId/parts/$partDocId/$kind/$safeName'; // ruta clara
+
+    final ref = storage.ref().child(path);
+
+    UploadTask task;
+    if (kIsWeb) {
+      task = ref.putData(file.bytes!);
+    } else {
+      task = ref.putFile(File(file.path!));
+    }
+
+    final snap = await task.whenComplete(() {});
+    return await snap.ref.getDownloadURL();
+  }
+
   // =================== SAVE ===================
 
   Future<void> _save() async {
@@ -116,9 +150,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       }
     }
     if (entered.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Agrega al menos un número de parte.')),
-      );
+      _snack('Agrega al menos un número de parte.');
       return;
     }
 
@@ -128,6 +160,11 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       // 2) Proyecto destino (crea si no existe)
       DocumentReference projRef;
       if (_selectedProjectId == null) {
+        if (_proyectoCtrl.text.trim().isEmpty) {
+          _snack('Nombre de proyecto requerido.');
+          setState(() => _saving = false);
+          return;
+        }
         projRef = FirebaseFirestore.instance.collection('projects').doc();
         await projRef.set({
           'proyecto': _proyectoCtrl.text.trim(),
@@ -141,65 +178,108 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             .doc(_selectedProjectId);
       }
 
-      // 3) Deduplicar internos (mismo PN repetido en la pantalla)
+      // 3) Deduplicar internos
       final uniqueMap = <String, _ParsedLine>{};
       for (final p in entered) {
         uniqueMap[p.pn] = p; // la última descripción gana
       }
-      var uniqueList = uniqueMap.values.toList();
+      final uniqueList = uniqueMap.values.toList();
 
-      // 4) Deduplicar contra Firestore del proyecto (si es existente)
+      // 4) Deduplicar contra Firestore si aplica
       final existing = _selectedProjectId != null
           ? await _getExistingPartNumbers(projRef.id)
           : <String>{};
-      final toInsert = uniqueList
-          .where((p) => !existing.contains(p.pn))
-          .toList();
-      final skippedCount = uniqueList.length - toInsert.length;
+      final toInsert = <_PendingPart>[];
 
-      if (toInsert.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'No hay partes nuevas para guardar (todas duplicadas).',
-            ),
+      for (final parsed in uniqueList) {
+        if (existing.contains(parsed.pn)) continue;
+        // Busca la fila UI correspondiente para extraer qty/archivos
+        final row = _rows.firstWhere(
+          (r) => _normPN(r.numeroCtrl.text) == parsed.pn,
+          orElse: () => _PartRow(),
+        );
+        final qty = int.tryParse(row.cantidadCtrl.text.trim()) ?? 0;
+
+        toInsert.add(
+          _PendingPart(
+            pn: parsed.pn,
+            desc: parsed.desc,
+            qty: math.max(0, qty),
+            drawing: row.drawing,
+            solids: List<PlatformFile>.from(row.solids),
           ),
         );
+      }
+
+      if (toInsert.isEmpty) {
+        _snack('No hay partes nuevas para guardar (todas duplicadas).');
         return;
       }
 
-      // 5) Batch write
-      final batch = FirebaseFirestore.instance.batch();
+      // 5) Guardado por parte + uploads
+      // Nota: usamos set+update por cada doc para tener el ID antes de subir archivos.
+      int ok = 0;
       for (final p in toInsert) {
         final pRef = projRef.collection('parts').doc();
-        batch.set(pRef, {
+        await pRef.set({
           'numeroParte': p.pn,
           'descripcionParte': p.desc,
+          'cantidadPlan': p.qty,
           'activo': true,
           'createdAt': FieldValue.serverTimestamp(),
         });
+
+        // Upload plano (opcional)
+        String? drawingUrl, drawingName;
+        if (p.drawing != null) {
+          drawingUrl = await _uploadFile(
+            projectId: projRef.id,
+            partDocId: pRef.id,
+            file: p.drawing!,
+            kind: 'drawing',
+          );
+          drawingName = p.drawing!.name;
+        }
+
+        // Upload sólidos (opcional, múltiples)
+        final solidUrls = <String>[];
+        final solidNames = <String>[];
+        for (final s in p.solids) {
+          final url = await _uploadFile(
+            projectId: projRef.id,
+            partDocId: pRef.id,
+            file: s,
+            kind: 'solids',
+          );
+          solidUrls.add(url);
+          solidNames.add(s.name);
+        }
+
+        // Update con URLs si hay algo
+        if (drawingUrl != null || solidUrls.isNotEmpty) {
+          await pRef.update({
+            if (drawingUrl != null) 'drawingUrl': drawingUrl,
+            if (drawingUrl != null) 'drawingName': drawingName,
+            if (solidUrls.isNotEmpty) 'solidUrls': solidUrls,
+            if (solidUrls.isNotEmpty) 'solidNames': solidNames,
+          });
+        }
+        ok++;
       }
-      await batch.commit();
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Guardadas ${toInsert.length} parte(s) '
-            '${skippedCount > 0 ? ' • Omitidas por duplicado: $skippedCount' : ''}',
-          ),
-        ),
-      );
+      _snack('Guardadas $ok parte(s).');
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      _snack('Error: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
+
+  void _snack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   // =================== UI ===================
 
@@ -311,13 +391,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
 
                             final parsed = _parseBulk(pasted);
                             if (parsed.isEmpty) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'No se detectaron P/N válidos.',
-                                  ),
-                                ),
-                              );
+                              _snack('No se detectaron P/N válidos.');
                               return;
                             }
 
@@ -343,57 +417,142 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                       final row = e.value;
 
                       return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Row(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              flex: 4,
-                              child: TextFormField(
-                                controller: row.numeroCtrl,
-                                textCapitalization:
-                                    TextCapitalization.characters,
-                                decoration: InputDecoration(
-                                  labelText: 'Nº de parte ${idx + 1}',
-                                  border: const OutlineInputBorder(),
+                            Row(
+                              children: [
+                                Expanded(
+                                  flex: 4,
+                                  child: TextFormField(
+                                    controller: row.numeroCtrl,
+                                    textCapitalization:
+                                        TextCapitalization.characters,
+                                    decoration: InputDecoration(
+                                      labelText: 'Nº de parte ${idx + 1}',
+                                      border: const OutlineInputBorder(),
+                                    ),
+                                    onChanged: (v) {
+                                      // normaliza visualmente en tiempo real (opcional)
+                                      final caret = row.numeroCtrl.selection;
+                                      row.numeroCtrl.value = row
+                                          .numeroCtrl
+                                          .value
+                                          .copyWith(
+                                            text: _normPN(v),
+                                            selection: caret,
+                                            composing: TextRange.empty,
+                                          );
+                                    },
+                                    validator: (v) {
+                                      if (idx == 0 &&
+                                          (v == null || v.trim().isEmpty)) {
+                                        return 'Requerido';
+                                      }
+                                      return null;
+                                    },
+                                  ),
                                 ),
-                                onChanged: (v) {
-                                  // normaliza visualmente en tiempo real (opcional)
-                                  final caret = row.numeroCtrl.selection;
-                                  row.numeroCtrl.value = row.numeroCtrl.value
-                                      .copyWith(
-                                        text: _normPN(v),
-                                        selection: caret,
-                                        composing: TextRange.empty,
-                                      );
-                                },
-                                validator: (v) {
-                                  if (idx == 0 &&
-                                      (v == null || v.trim().isEmpty)) {
-                                    return 'Requerido';
-                                  }
-                                  return null;
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              flex: 5,
-                              child: TextFormField(
-                                controller: row.descCtrl,
-                                decoration: const InputDecoration(
-                                  labelText: 'Descripción (opcional)',
-                                  border: OutlineInputBorder(),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  flex: 5,
+                                  child: TextFormField(
+                                    controller: row.descCtrl,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Descripción (opcional)',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                const SizedBox(width: 8),
+                                SizedBox(
+                                  width: 110,
+                                  child: TextFormField(
+                                    controller: row.cantidadCtrl,
+                                    keyboardType: TextInputType.number,
+                                    decoration: const InputDecoration(
+                                      labelText: 'BOM',
+                                      helperText: '',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                IconButton(
+                                  tooltip: 'Quitar fila',
+                                  onPressed: _rows.length == 1
+                                      ? null
+                                      : () =>
+                                            setState(() => _rows.removeAt(idx)),
+                                  icon: const Icon(Icons.remove_circle_outline),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
-                              tooltip: 'Quitar fila',
-                              onPressed: _rows.length == 1
-                                  ? null
-                                  : () => setState(() => _rows.removeAt(idx)),
-                              icon: const Icon(Icons.remove_circle_outline),
+                            const SizedBox(height: 8),
+                            // Archivos
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final pick = await FilePicker.platform
+                                        .pickFiles(
+                                          type: FileType.custom,
+                                          allowedExtensions: [
+                                            'jpg',
+                                            'jpeg',
+                                            'pdf',
+                                          ],
+                                          withData: kIsWeb, // bytes en web
+                                        );
+                                    if (pick != null && pick.files.isNotEmpty) {
+                                      setState(() {
+                                        row.drawing = pick.files.first;
+                                      });
+                                    }
+                                  },
+                                  icon: const Icon(
+                                    Icons.picture_as_pdf_outlined,
+                                  ),
+                                  label: const Text('Plano (.jpg/.pdf)'),
+                                ),
+                                if (row.drawing != null)
+                                  Chip(
+                                    label: Text(row.drawing!.name),
+                                    onDeleted: () =>
+                                        setState(() => row.drawing = null),
+                                  ),
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final pick = await FilePicker.platform
+                                        .pickFiles(
+                                          type: FileType.custom,
+                                          allowMultiple: true,
+                                          allowedExtensions: ['x_t', 'step'],
+                                          withData: kIsWeb,
+                                        );
+                                    if (pick != null && pick.files.isNotEmpty) {
+                                      setState(() {
+                                        row.solids.addAll(pick.files);
+                                      });
+                                    }
+                                  },
+                                  icon: const Icon(Icons.view_in_ar_outlined),
+                                  label: const Text('Sólido (.x_t/.step)'),
+                                ),
+                                ...row.solids.asMap().entries.map(
+                                  (s) => Chip(
+                                    label: Text(s.value.name),
+                                    onDeleted: () => setState(
+                                      () => row.solids.removeAt(s.key),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
+                            const Divider(height: 20),
                           ],
                         ),
                       );
@@ -431,14 +590,19 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 }
 
-/// Helper: fila de captura
+/// Fila de captura + archivos + BOM
 class _PartRow {
   final TextEditingController numeroCtrl = TextEditingController();
   final TextEditingController descCtrl = TextEditingController();
+  final TextEditingController cantidadCtrl = TextEditingController();
+
+  PlatformFile? drawing; // jpg/pdf
+  final List<PlatformFile> solids = []; // x_t / step (múltiples)
 
   void dispose() {
     numeroCtrl.dispose();
     descCtrl.dispose();
+    cantidadCtrl.dispose();
   }
 }
 
@@ -447,6 +611,22 @@ class _ParsedLine {
   final String pn;
   final String desc;
   _ParsedLine({required this.pn, required this.desc});
+}
+
+/// Estructura interna para guardar y subir
+class _PendingPart {
+  final String pn;
+  final String desc;
+  final int qty;
+  final PlatformFile? drawing;
+  final List<PlatformFile> solids;
+  _PendingPart({
+    required this.pn,
+    required this.desc,
+    required this.qty,
+    required this.drawing,
+    required this.solids,
+  });
 }
 
 /// Diálogo para pegar texto masivo

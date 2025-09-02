@@ -727,7 +727,7 @@ class _NewMovementTabState extends State<_NewMovementTab> {
       } else if (type == 'out') {
         if (currentQty - qty < 0) {
           throw Exception(
-            'Stock insuficiente (${currentQty}) para salida de $qty',
+            'Stock insuficiente ($currentQty) para salida de $qty',
           );
         }
         newQty = currentQty - qty;
