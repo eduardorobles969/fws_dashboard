@@ -21,6 +21,8 @@ dependencies:
   flutter_launcher_icons: ^0.14.4
   flutter_native_splash: ^2.4.6
   file_picker: ^10.3.2
+  pdf: ^3.11.3
+  printing: ^5.14.2
   
 
 dev_dependencies:

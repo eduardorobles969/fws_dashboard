@@ -177,6 +177,60 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
         });
   }
 
+  // ====== BOM faltante (plan - producido) ======
+
+  Future<int> _producedForPart({
+    required String projectId,
+    required String partId,
+  }) async {
+    final partRef = FirebaseFirestore.instance
+        .collection('projects')
+        .doc(projectId)
+        .collection('parts')
+        .doc(partId);
+
+    final qs = await FirebaseFirestore.instance
+        .collection('production_daily')
+        .where('parteRef', isEqualTo: partRef)
+        // Si quisieras solo órdenes terminadas, habilita este filtro:
+        // .where('status', isEqualTo: 'hecho')
+        .get();
+
+    int sum = 0;
+    for (final d in qs.docs) {
+      sum += (d.data()['cantidad'] ?? 0) as int;
+    }
+    return sum;
+  }
+
+  Future<void> _loadSuggestedQty() async {
+    if (_projectId == null || _partId == null) return;
+
+    // Lee cantidadPlan (BOM)
+    final partSnap = await FirebaseFirestore.instance
+        .collection('projects')
+        .doc(_projectId)
+        .collection('parts')
+        .doc(_partId)
+        .get();
+
+    final plan = (partSnap.data()?['cantidadPlan'] ?? 0) as int;
+
+    // Suma producido del P/N
+    final produced = await _producedForPart(
+      projectId: _projectId!,
+      partId: _partId!,
+    );
+
+    final faltante = max(0, plan - produced);
+
+    if (!mounted) return;
+    setState(() {
+      _cantidadSugeridaCtrl.text = faltante.toString();
+    });
+  }
+
+  // ====== Guardado ======
   Future<void> _submit() async {
     if (_saving) return;
     if (!_formKey.currentState!.validate()) return;
@@ -325,6 +379,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                       ),
                       const SizedBox(height: 12),
 
+                      // Proyecto
                       DropdownButtonFormField<String>(
                         value: _projectId,
                         decoration: const InputDecoration(
@@ -352,12 +407,14 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                             _partId = null;
                             _partNumber = null;
                             _descripcionParteCtrl.clear();
+                            _cantidadSugeridaCtrl.clear();
                           });
                         },
                         validator: (v) =>
                             v == null ? 'Selecciona un proyecto' : null,
                       ),
 
+                      // Nº de parte
                       const SizedBox(height: 12),
                       StreamBuilder<List<Map<String, dynamic>>>(
                         stream: _projectId == null
@@ -379,7 +436,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                                   ),
                                 )
                                 .toList(),
-                            onChanged: (v) {
+                            onChanged: (v) async {
                               if (v == null) return;
                               final sel = parts.firstWhere((p) => p['id'] == v);
                               setState(() {
@@ -388,6 +445,8 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                                 _descripcionParteCtrl.text =
                                     (sel['descripcionParte'] as String?) ?? '';
                               });
+                              // Sugerir cantidad (BOM faltante)
+                              await _loadSuggestedQty();
                             },
                             validator: (v) => _projectId == null
                                 ? 'Elige primero un proyecto'
@@ -398,6 +457,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                         },
                       ),
 
+                      // Descripciones
                       const SizedBox(height: 12),
                       TextFormField(
                         controller: _descripcionProyectoCtrl,
@@ -415,6 +475,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                         ),
                       ),
 
+                      // Operaciones y cantidades
                       const SizedBox(height: 16),
                       const Text(
                         'Operación y Cantidad',
@@ -563,6 +624,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                         ),
                       ),
 
+                      // Fechas
                       const SizedBox(height: 18),
                       const Text(
                         'Fechas',
@@ -760,7 +822,6 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
             }),
 
             const SizedBox(height: 8),
-            // Botones sin overflow
             Wrap(
               spacing: 12,
               runSpacing: 8,

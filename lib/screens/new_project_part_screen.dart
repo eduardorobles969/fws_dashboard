@@ -1,16 +1,19 @@
 import 'dart:io' show File;
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'dart:math' as math;
 
 /// Alta de proyecto y carga masiva de números de parte.
 /// - Puede crear proyecto nuevo o agregar partes a uno existente.
-/// - Pegar lista masiva: "PN | Descripción" (o coma, TAB, solo PN)
+/// - Pegar lista masiva: "PN | Descripción | BOM | Nesting1 | Nesting2"
+///   (también con coma o TAB; las columnas 3, 4 y 5 son opcionales)
 /// - Cada parte ahora trae:
 ///   * cantidadPlan (BOM)
+///   * nesting1, nesting2 (texto)
 ///   * plano (jpg/pdf)
 ///   * sólidos (x_t/step, múltiples)
 /// - Archivos se suben a Storage y se guardan sus URLs en el doc.
@@ -57,7 +60,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         .collection('projects')
         .doc(projectId)
         .collection('parts')
-        // sin orderBy -> no requiere índice
         .get();
 
     return qs.docs
@@ -75,7 +77,9 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     return trimmed.replaceAll(RegExp(r'\s+'), ' ').toUpperCase();
   }
 
-  /// Intenta parsear varias líneas pegadas: "PN[,| | \t | |] Descripción"
+  /// Intenta parsear varias líneas pegadas:
+  /// Soporta separadores |  ,  TAB
+  /// Columnas: PN | Descripción | BOM | Nesting1 | Nesting2  (3..5 columnas)
   List<_ParsedLine> _parseBulk(String raw) {
     final lines = raw.split('\n');
     final out = <_ParsedLine>[];
@@ -83,26 +87,37 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       final clean = line.trim();
       if (clean.isEmpty) continue;
 
-      // separadores: |  ,  \t (en ese orden)
-      final byPipe = clean.split('|');
-      final byComma = clean.split(',');
-      final byTab = clean.split('\t');
-
-      List<String> parts;
-      if (byPipe.length >= 2) {
-        parts = [byPipe[0], byPipe.sublist(1).join('|')];
-      } else if (byComma.length >= 2) {
-        parts = [byComma[0], byComma.sublist(1).join(',')];
-      } else if (byTab.length >= 2) {
-        parts = [byTab[0], byTab.sublist(1).join('\t')];
+      List<String> cols;
+      if (clean.contains('|')) {
+        cols = clean.split('|');
+      } else if (clean.contains('\t')) {
+        cols = clean.split('\t');
+      } else if (clean.contains(',')) {
+        cols = clean.split(',');
       } else {
-        // solo PN
-        parts = [clean, ''];
+        cols = [clean]; // solo PN
       }
 
-      final pn = _normPN(parts[0]);
-      final desc = parts[1].trim();
-      if (pn.isNotEmpty) out.add(_ParsedLine(pn: pn, desc: desc));
+      // normaliza: recorta espacios de cada celda
+      cols = cols.map((c) => c.trim()).toList();
+
+      final pn = _normPN(cols.isNotEmpty ? cols[0] : '');
+      if (pn.isEmpty) continue;
+
+      final desc = cols.length >= 2 ? cols[1] : '';
+      final qty = (cols.length >= 3 ? int.tryParse(cols[2]) : null) ?? 0;
+      final nesting1 = cols.length >= 4 ? cols[3] : '';
+      final nesting2 = cols.length >= 5 ? cols[4] : '';
+
+      out.add(
+        _ParsedLine(
+          pn: pn,
+          desc: desc,
+          qty: qty,
+          nesting1: nesting1,
+          nesting2: nesting2,
+        ),
+      );
     }
     return out;
   }
@@ -113,15 +128,11 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     required String projectId,
     required String partDocId,
     required PlatformFile file,
-    required String kind, // 'drawing' | 'solid'
+    required String kind, // 'drawing' | 'solids'
   }) async {
     final storage = FirebaseStorage.instance;
-    final ext = (file.extension ?? '').toLowerCase();
     final safeName = (file.name).replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
-
-    final path =
-        'projects/$projectId/parts/$partDocId/$kind/$safeName'; // ruta clara
-
+    final path = 'projects/$projectId/parts/$partDocId/$kind/$safeName';
     final ref = storage.ref().child(path);
 
     UploadTask task;
@@ -135,6 +146,9 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     return await snap.ref.getDownloadURL();
   }
 
+  void _snack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
   // =================== SAVE ===================
 
   Future<void> _save() async {
@@ -145,8 +159,21 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     for (final r in _rows) {
       final pn = _normPN(r.numeroCtrl.text);
       final desc = r.descCtrl.text.trim();
+      // si hay qty/nesting escritos en UI, los tomamos
+      final qtyUI = int.tryParse(r.cantidadCtrl.text.trim());
+      final nesting1UI = r.nesting1Ctrl.text.trim();
+      final nesting2UI = r.nesting2Ctrl.text.trim();
+
       if (pn.isNotEmpty) {
-        entered.add(_ParsedLine(pn: pn, desc: desc));
+        entered.add(
+          _ParsedLine(
+            pn: pn,
+            desc: desc,
+            qty: qtyUI ?? 0,
+            nesting1: nesting1UI,
+            nesting2: nesting2UI,
+          ),
+        );
       }
     }
     if (entered.isEmpty) {
@@ -181,7 +208,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       // 3) Deduplicar internos
       final uniqueMap = <String, _ParsedLine>{};
       for (final p in entered) {
-        uniqueMap[p.pn] = p; // la última descripción gana
+        uniqueMap[p.pn] = p; // la última línea para mismo PN gana
       }
       final uniqueList = uniqueMap.values.toList();
 
@@ -189,62 +216,59 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       final existing = _selectedProjectId != null
           ? await _getExistingPartNumbers(projRef.id)
           : <String>{};
-      final toInsert = <_PendingPart>[];
 
+      // 5) Transformar a _PendingPart y guardar
+      int ok = 0;
       for (final parsed in uniqueList) {
         if (existing.contains(parsed.pn)) continue;
-        // Busca la fila UI correspondiente para extraer qty/archivos
+
+        // localiza la fila UI real (para archivos)
         final row = _rows.firstWhere(
           (r) => _normPN(r.numeroCtrl.text) == parsed.pn,
           orElse: () => _PartRow(),
         );
-        final qty = int.tryParse(row.cantidadCtrl.text.trim()) ?? 0;
 
-        toInsert.add(
-          _PendingPart(
-            pn: parsed.pn,
-            desc: parsed.desc,
-            qty: math.max(0, qty),
-            drawing: row.drawing,
-            solids: List<PlatformFile>.from(row.solids),
-          ),
-        );
-      }
+        final qty =
+            (int.tryParse(row.cantidadCtrl.text.trim()) ??
+            parsed.qty); // prioridad UI
+        final nesting1 =
+            (row.nesting1Ctrl.text.trim().isNotEmpty
+                    ? row.nesting1Ctrl.text
+                    : parsed.nesting1)
+                .trim();
+        final nesting2 =
+            (row.nesting2Ctrl.text.trim().isNotEmpty
+                    ? row.nesting2Ctrl.text
+                    : parsed.nesting2)
+                .trim();
 
-      if (toInsert.isEmpty) {
-        _snack('No hay partes nuevas para guardar (todas duplicadas).');
-        return;
-      }
-
-      // 5) Guardado por parte + uploads
-      // Nota: usamos set+update por cada doc para tener el ID antes de subir archivos.
-      int ok = 0;
-      for (final p in toInsert) {
         final pRef = projRef.collection('parts').doc();
         await pRef.set({
-          'numeroParte': p.pn,
-          'descripcionParte': p.desc,
-          'cantidadPlan': p.qty,
+          'numeroParte': parsed.pn,
+          'descripcionParte': parsed.desc,
+          'cantidadPlan': math.max(0, qty),
+          if (nesting1.isNotEmpty) 'nesting1': nesting1,
+          if (nesting2.isNotEmpty) 'nesting2': nesting2,
           'activo': true,
           'createdAt': FieldValue.serverTimestamp(),
         });
 
         // Upload plano (opcional)
         String? drawingUrl, drawingName;
-        if (p.drawing != null) {
+        if (row.drawing != null) {
           drawingUrl = await _uploadFile(
             projectId: projRef.id,
             partDocId: pRef.id,
-            file: p.drawing!,
+            file: row.drawing!,
             kind: 'drawing',
           );
-          drawingName = p.drawing!.name;
+          drawingName = row.drawing!.name;
         }
 
         // Upload sólidos (opcional, múltiples)
         final solidUrls = <String>[];
         final solidNames = <String>[];
-        for (final s in p.solids) {
+        for (final s in row.solids) {
           final url = await _uploadFile(
             projectId: projRef.id,
             partDocId: pRef.id,
@@ -255,7 +279,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
           solidNames.add(s.name);
         }
 
-        // Update con URLs si hay algo
         if (drawingUrl != null || solidUrls.isNotEmpty) {
           await pRef.update({
             if (drawingUrl != null) 'drawingUrl': drawingUrl,
@@ -264,6 +287,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             if (solidUrls.isNotEmpty) 'solidNames': solidNames,
           });
         }
+
         ok++;
       }
 
@@ -277,9 +301,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       if (mounted) setState(() => _saving = false);
     }
   }
-
-  void _snack(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   // =================== UI ===================
 
@@ -400,6 +421,11 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 final row = _PartRow();
                                 row.numeroCtrl.text = p.pn;
                                 row.descCtrl.text = p.desc;
+                                if (p.qty > 0) {
+                                  row.cantidadCtrl.text = p.qty.toString();
+                                }
+                                row.nesting1Ctrl.text = p.nesting1;
+                                row.nesting2Ctrl.text = p.nesting2;
                                 _rows.add(row);
                               }
                             });
@@ -434,7 +460,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                       border: const OutlineInputBorder(),
                                     ),
                                     onChanged: (v) {
-                                      // normaliza visualmente en tiempo real (opcional)
+                                      // normaliza visualmente
                                       final caret = row.numeroCtrl.selection;
                                       row.numeroCtrl.value = row
                                           .numeroCtrl
@@ -489,6 +515,35 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 ),
                               ],
                             ),
+
+                            const SizedBox(height: 8),
+                            // Nesting
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: row.nesting1Ctrl,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Nesting (caso 1)',
+                                      hintText: 'p. ej. bloque 4x4x4 / A36',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: row.nesting2Ctrl,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Nesting (caso 2)',
+                                      hintText: 'p. ej. bloque 4x4x16 / A36',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+
                             const SizedBox(height: 8),
                             // Archivos
                             Wrap(
@@ -590,11 +645,13 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 }
 
-/// Fila de captura + archivos + BOM
+/// Fila de captura + archivos + BOM + Nesting
 class _PartRow {
   final TextEditingController numeroCtrl = TextEditingController();
   final TextEditingController descCtrl = TextEditingController();
   final TextEditingController cantidadCtrl = TextEditingController();
+  final TextEditingController nesting1Ctrl = TextEditingController();
+  final TextEditingController nesting2Ctrl = TextEditingController();
 
   PlatformFile? drawing; // jpg/pdf
   final List<PlatformFile> solids = []; // x_t / step (múltiples)
@@ -603,6 +660,8 @@ class _PartRow {
     numeroCtrl.dispose();
     descCtrl.dispose();
     cantidadCtrl.dispose();
+    nesting1Ctrl.dispose();
+    nesting2Ctrl.dispose();
   }
 }
 
@@ -610,22 +669,15 @@ class _PartRow {
 class _ParsedLine {
   final String pn;
   final String desc;
-  _ParsedLine({required this.pn, required this.desc});
-}
-
-/// Estructura interna para guardar y subir
-class _PendingPart {
-  final String pn;
-  final String desc;
   final int qty;
-  final PlatformFile? drawing;
-  final List<PlatformFile> solids;
-  _PendingPart({
+  final String nesting1;
+  final String nesting2;
+  _ParsedLine({
     required this.pn,
     required this.desc,
     required this.qty,
-    required this.drawing,
-    required this.solids,
+    required this.nesting1,
+    required this.nesting2,
   });
 }
 
@@ -651,17 +703,18 @@ class _PasteDialogState extends State<_PasteDialog> {
     return AlertDialog(
       title: const Text('Pegar lista de P/N'),
       content: SizedBox(
-        width: 480,
+        width: 520,
         child: TextField(
           controller: _textCtrl,
-          maxLines: 10,
+          maxLines: 12,
           decoration: const InputDecoration(
             hintText:
-                'Una por línea. Formatos válidos:\n'
+                'Una por línea. Formatos válidos (usa |, , o TAB):\n'
                 'PN | Descripción\n'
-                'PN, Descripción\n'
-                'PN<tab>Descripción\n'
-                'PN (solo PN)',
+                'PN | Descripción | BOM\n'
+                'PN | Descripción | BOM | Nesting1\n'
+                'PN | Descripción | BOM | Nesting1 | Nesting2\n'
+                'Ej: BS-0086-EV-001 | Válvula 1 | 3 | bloque 4x4x4 / A36 | bloque 4x4x16 / A36',
             border: OutlineInputBorder(),
           ),
         ),

@@ -17,6 +17,7 @@ import 'package:fws_dashboard/screens/warehouse_screen.dart';
 import 'package:fws_dashboard/screens/gantt_screen.dart';
 import 'admin_users_screen.dart';
 import 'package:fws_dashboard/screens/industry40_screen.dart';
+import 'bom_screen.dart';
 
 /// Punto para series pequeñas (no crítico aquí, pero lo dejamos)
 class ProductionPoint {
@@ -203,6 +204,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 );
               },
             ),
+
+            ListTile(
+              leading: const Icon(Icons.list_alt),
+              title: const Text('BOM (proyecto)'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const BomScreen()),
+                );
+              },
+            ),
+
             ListTile(
               leading: const Icon(Icons.precision_manufacturing_outlined),
               title: const Text("Industria 4.0"),
