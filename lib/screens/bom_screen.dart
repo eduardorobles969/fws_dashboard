@@ -18,12 +18,83 @@ class _BomScreenState extends State<BomScreen> {
   String? _projectId;
   String _search = '';
   final _onlyMaterialPending = ValueNotifier<bool>(false);
-  final _onlyNestingPending = ValueNotifier<bool>(false);
-
-  /// selección para agrupar / desagrupar
+  final _onlyPurchasePending = ValueNotifier<bool>(false);
   final Set<String> _selected = <String>{};
 
-  // ---------- Data ----------
+  // Catálogos
+  late Future<List<_MaterialDoc>> _materialsFuture;
+  late Future<List<_SupplierDoc>> _suppliersFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _materialsFuture = _loadMaterials();
+    _suppliersFuture = _loadSuppliers();
+  }
+
+  // ----- CARGA CATÁLOGOS con fallback si faltan índices -----
+  Future<List<_MaterialDoc>> _loadMaterials() async {
+    final col = FirebaseFirestore.instance.collection('materials');
+    try {
+      final qs = await col
+          .where('active', isEqualTo: true)
+          .orderBy('sort')
+          .get();
+      return qs.docs.map(_matFromDoc).toList();
+    } on FirebaseException catch (e) {
+      // Si pide índice, reintenta sin where y filtra en cliente
+      if (e.code == 'failed-precondition') {
+        final qs = await col.orderBy('sort').get();
+        return qs.docs
+            .where((d) => (d.data()['active'] ?? true) == true)
+            .map(_matFromDoc)
+            .toList();
+      }
+      rethrow;
+    }
+  }
+
+  _MaterialDoc _matFromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data();
+    return _MaterialDoc(
+      id: d.id,
+      code: (m['code'] ?? '').toString(),
+      desc: (m['desc'] ?? '').toString(),
+      colorHex: (m['color'] ?? '').toString(),
+      ref: d.reference,
+    );
+  }
+
+  Future<List<_SupplierDoc>> _loadSuppliers() async {
+    final col = FirebaseFirestore.instance.collection('suppliers');
+    try {
+      final qs = await col
+          .where('active', isEqualTo: true)
+          .orderBy('name')
+          .get();
+      return qs.docs.map(_supFromDoc).toList();
+    } on FirebaseException catch (e) {
+      if (e.code == 'failed-precondition') {
+        final qs = await col.orderBy('name').get();
+        return qs.docs
+            .where((d) => (d.data()['active'] ?? true) == true)
+            .map(_supFromDoc)
+            .toList();
+      }
+      rethrow;
+    }
+  }
+
+  _SupplierDoc _supFromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data();
+    return _SupplierDoc(
+      id: d.id,
+      name: (m['name'] ?? '').toString(),
+      ref: d.reference,
+    );
+  }
+
+  // ---------------- DATA ----------------
   Future<List<Map<String, dynamic>>> _projects() async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
@@ -53,13 +124,22 @@ class _BomScreenState extends State<BomScreen> {
               plan: (m['cantidadPlan'] ?? 0) is int
                   ? (m['cantidadPlan'] as int)
                   : int.tryParse('${m['cantidadPlan']}') ?? 0,
-              nesting: (m['nesting'] ?? '').toString(),
-              nestStatus: (m['nestStatus'] ?? 'pendiente').toString(),
+              nestDim: (m['nestDim'] ?? m['nesting'] ?? '')
+                  .toString(), // compat
+              // Para Compras el estatus es simplemente comprado/pendiente
               materialComprado: (m['materialComprado'] ?? false) == true,
               materialCompradoFecha: m['materialCompradoFecha'] is Timestamp
                   ? (m['materialCompradoFecha'] as Timestamp)
                   : null,
-              proveedor: (m['proveedor'] ?? '').toString(),
+              materialCode: (m['materialCode'] ?? '').toString(),
+              materialRef: m['materialRef'] is DocumentReference
+                  ? m['materialRef']
+                  : null,
+              // Proveedor: preferimos supplierRef; si no, caer a texto viejo
+              proveedorTexto: (m['proveedor'] ?? '').toString(),
+              supplierRef: m['supplierRef'] is DocumentReference
+                  ? m['supplierRef']
+                  : null,
               nestGroup: (m['nestGroup'] ?? '').toString(),
               docRef: d.reference,
             );
@@ -101,12 +181,11 @@ class _BomScreenState extends State<BomScreen> {
       'plan',
       'asignada',
       'faltan',
-      'nesting',
-      'nestGroup',
-      'nestStatus',
-      'materialComprado',
-      'materialCompradoFecha',
+      'material',
+      'dimension',
+      'estatusCompra',
       'proveedor',
+      'fechaCompra',
     ];
     final b = StringBuffer()..writeln(header.join(','));
     for (final r in rows) {
@@ -117,16 +196,15 @@ class _BomScreenState extends State<BomScreen> {
           r.plan,
           r.asignada,
           (r.plan - r.asignada).clamp(0, 1 << 31),
-          r.nesting.replaceAll(',', ' '),
-          r.nestGroup.replaceAll(',', ' '),
-          r.nestStatus,
-          r.materialComprado ? 'SI' : 'NO',
+          r.materialLabel.replaceAll(',', ' '),
+          r.nestDim.replaceAll(',', ' '),
+          r.materialComprado ? 'Comprado' : 'Pendiente',
+          r.proveedorMostrar.replaceAll(',', ' '),
           r.materialCompradoFecha == null
               ? ''
               : DateFormat(
                   'yyyy-MM-dd',
                 ).format(r.materialCompradoFecha!.toDate()),
-          r.proveedor.replaceAll(',', ' '),
         ].join(','),
       );
     }
@@ -191,9 +269,9 @@ class _BomScreenState extends State<BomScreen> {
               3: pw.FixedColumnWidth(38),
               4: pw.FixedColumnWidth(38),
               5: pw.FlexColumnWidth(2),
-              6: pw.FixedColumnWidth(55),
-              7: pw.FixedColumnWidth(60),
-              8: pw.FixedColumnWidth(70),
+              6: pw.FlexColumnWidth(2),
+              7: pw.FixedColumnWidth(64),
+              8: pw.FixedColumnWidth(80),
               9: pw.FixedColumnWidth(64),
             },
             headers: [
@@ -202,30 +280,29 @@ class _BomScreenState extends State<BomScreen> {
               'Plan',
               'Asign.',
               'Faltan',
-              'Nesting',
-              'Grupo',
-              'Estatus',
               'Material',
+              'Dimensión',
+              'Estatus',
               'Proveedor',
+              'Fecha',
             ],
             data: rows.map((r) {
               final falt = (r.plan - r.asignada).clamp(0, 1 << 31);
-              final mat = r.materialComprado
-                  ? (r.materialCompradoFecha == null
-                        ? 'Comprado'
-                        : 'Comprado ${DateFormat('yyyy-MM-dd').format(r.materialCompradoFecha!.toDate())}')
-                  : 'Pendiente';
               return [
                 r.numero,
                 r.descr,
                 r.plan.toString(),
                 r.asignada.toString(),
                 '$falt',
-                r.nesting,
-                r.nestGroup,
-                _statusLabel(r.nestStatus),
-                mat,
-                r.proveedor,
+                r.materialLabel,
+                r.nestDim,
+                r.materialComprado ? 'Comprado' : 'Pendiente',
+                r.proveedorMostrar,
+                r.materialCompradoFecha == null
+                    ? ''
+                    : DateFormat(
+                        'yyyy-MM-dd',
+                      ).format(r.materialCompradoFecha!.toDate()),
               ];
             }).toList(),
           ),
@@ -254,7 +331,7 @@ class _BomScreenState extends State<BomScreen> {
     if (_selected.isEmpty) return;
     final sel = rows.where((r) => _selected.contains(r.id)).toList();
 
-    final nestingCtrl = TextEditingController();
+    final dimCtrl = TextEditingController();
     final groupCtrl = TextEditingController(
       text: 'GRP-${DateFormat('yyMMdd-HHmm').format(DateTime.now())}',
     );
@@ -267,10 +344,10 @@ class _BomScreenState extends State<BomScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
-              controller: nestingCtrl,
+              controller: dimCtrl,
               decoration: const InputDecoration(
-                labelText: 'Nesting del grupo',
-                hintText: 'p.ej. bloque 4x4x4 / A36',
+                labelText: 'Dimensión del grupo (opcional)',
+                hintText: 'p.ej. bloque 4x4x4',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -299,13 +376,13 @@ class _BomScreenState extends State<BomScreen> {
 
     if (ok != true) return;
 
-    final nesting = nestingCtrl.text.trim();
+    final dim = dimCtrl.text.trim();
     final group = groupCtrl.text.trim().isEmpty ? '-' : groupCtrl.text.trim();
 
     final batch = FirebaseFirestore.instance.batch();
     for (final r in sel) {
       batch.update(r.ref, {
-        if (nesting.isNotEmpty) 'nesting': nesting,
+        if (dim.isNotEmpty) 'nestDim': dim,
         'nestGroup': group,
       });
     }
@@ -401,235 +478,338 @@ class _BomScreenState extends State<BomScreen> {
                   const SizedBox(height: 10),
 
                   Expanded(
-                    child: StreamBuilder<List<_PartDoc>>(
-                      stream: _partsStream(),
-                      builder: (context, partsSnap) {
-                        final parts = partsSnap.data ?? const <_PartDoc>[];
-                        if (_projectId == null) {
-                          return const Center(child: Text('Elige un proyecto'));
-                        }
-                        if (partsSnap.connectionState !=
-                            ConnectionState.active) {
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        }
+                    child: FutureBuilder<List<_MaterialDoc>>(
+                      future: _materialsFuture,
+                      builder: (context, matSnap) {
+                        final mats = matSnap.data ?? const <_MaterialDoc>[];
+                        return FutureBuilder<List<_SupplierDoc>>(
+                          future: _suppliersFuture,
+                          builder: (context, supSnap) {
+                            final sups = supSnap.data ?? const <_SupplierDoc>[];
 
-                        return StreamBuilder<Map<String, int>>(
-                          stream: _assignedByPart(),
-                          builder: (context, assignSnap) {
-                            final assigned =
-                                assignSnap.data ?? const <String, int>{};
+                            return StreamBuilder<List<_PartDoc>>(
+                              stream: _partsStream(),
+                              builder: (context, partsSnap) {
+                                final parts =
+                                    partsSnap.data ?? const <_PartDoc>[];
+                                if (_projectId == null) {
+                                  return const Center(
+                                    child: Text('Elige un proyecto'),
+                                  );
+                                }
+                                if (partsSnap.connectionState !=
+                                    ConnectionState.active) {
+                                  return const Center(
+                                    child: CircularProgressIndicator(),
+                                  );
+                                }
 
-                            List<_BomRow> rows = parts.map((p) {
-                              final asign = assigned[p.docRef.path] ?? 0;
-                              return _BomRow(
-                                id: p.id,
-                                numero: p.numero,
-                                descr: p.descr,
-                                plan: p.plan,
-                                asignada: asign,
-                                nesting: p.nesting,
-                                nestGroup: p.nestGroup,
-                                nestStatus: p.nestStatus,
-                                materialComprado: p.materialComprado,
-                                materialCompradoFecha: p.materialCompradoFecha,
-                                proveedor: p.proveedor,
-                                ref: p.docRef,
-                              );
-                            }).toList();
+                                return StreamBuilder<Map<String, int>>(
+                                  stream: _assignedByPart(),
+                                  builder: (context, assignSnap) {
+                                    final assigned =
+                                        assignSnap.data ??
+                                        const <String, int>{};
 
-                            if (_search.isNotEmpty) {
-                              rows = rows
-                                  .where(
-                                    (r) =>
-                                        r.numero.toUpperCase().contains(
-                                          _search,
-                                        ) ||
-                                        r.descr.toUpperCase().contains(_search),
-                                  )
-                                  .toList();
-                            }
-                            if (_onlyMaterialPending.value) {
-                              rows.removeWhere((r) => r.materialComprado);
-                            }
-                            if (_onlyNestingPending.value) {
-                              rows.removeWhere(
-                                (r) => r.nestStatus == 'completo',
-                              );
-                            }
+                                    // Fusionar info + material/proveedor label
+                                    List<_BomRow> rows = parts.map((p) {
+                                      final asign =
+                                          assigned[p.docRef.path] ?? 0;
 
-                            final totalPlan = rows.fold<int>(
-                              0,
-                              (a, b) => a + b.plan,
-                            );
-                            final totalAsign = rows.fold<int>(
-                              0,
-                              (a, b) => a + b.asignada,
-                            );
+                                      // Material label/color
+                                      String matLabel = '';
+                                      String? matColor;
+                                      if (p.materialCode.isNotEmpty) {
+                                        final m = mats.firstWhere(
+                                          (x) => x.code == p.materialCode,
+                                          orElse: () => _MaterialDoc.empty(),
+                                        );
+                                        if (m.isValid) {
+                                          matLabel = '${m.code} · ${m.desc}';
+                                          matColor = m.colorHex;
+                                        } else {
+                                          matLabel = p.materialCode;
+                                        }
+                                      } else if (p.materialRef != null) {
+                                        final m = mats.firstWhere(
+                                          (x) =>
+                                              x.ref.path == p.materialRef!.path,
+                                          orElse: () => _MaterialDoc.empty(),
+                                        );
+                                        if (m.isValid) {
+                                          matLabel = '${m.code} · ${m.desc}';
+                                          matColor = m.colorHex;
+                                        }
+                                      }
 
-                            final hasSelection = _selected.isNotEmpty;
+                                      // Proveedor a mostrar
+                                      String prov = p.proveedorTexto.trim();
+                                      if (p.supplierRef != null) {
+                                        final match = sups.firstWhere(
+                                          (s) =>
+                                              s.ref.path == p.supplierRef!.path,
+                                          orElse: () => _SupplierDoc.empty(),
+                                        );
+                                        if (match.isValid) prov = match.name;
+                                      }
 
-                            return Column(
-                              children: [
-                                // Totales + acciones principales
-                                Row(
-                                  children: [
-                                    Flexible(
-                                      child: Text(
-                                        'Total plan: $totalPlan  •  Asignada: $totalAsign',
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Flexible(
-                                      child: Wrap(
-                                        spacing: 6,
-                                        runSpacing: 6,
-                                        children: [
-                                          OutlinedButton.icon(
-                                            style: OutlinedButton.styleFrom(
-                                              visualDensity:
-                                                  VisualDensity.compact,
+                                      return _BomRow(
+                                        id: p.id,
+                                        numero: p.numero,
+                                        descr: p.descr,
+                                        plan: p.plan,
+                                        asignada: asign,
+                                        nestDim: p.nestDim,
+                                        nestGroup: p.nestGroup,
+                                        materialLabel: matLabel,
+                                        materialColorHex: matColor,
+                                        materialComprado: p.materialComprado,
+                                        materialCompradoFecha:
+                                            p.materialCompradoFecha,
+                                        proveedorMostrar: prov,
+                                        ref: p.docRef,
+                                      );
+                                    }).toList();
+
+                                    if (_search.isNotEmpty) {
+                                      rows = rows
+                                          .where(
+                                            (r) =>
+                                                r.numero.toUpperCase().contains(
+                                                  _search,
+                                                ) ||
+                                                r.descr.toUpperCase().contains(
+                                                  _search,
+                                                ),
+                                          )
+                                          .toList();
+                                    }
+                                    if (_onlyMaterialPending.value) {
+                                      rows.removeWhere(
+                                        (r) => r.materialComprado,
+                                      );
+                                    }
+                                    if (_onlyPurchasePending.value) {
+                                      rows.removeWhere(
+                                        (r) => r.materialComprado == true,
+                                      );
+                                    }
+
+                                    final totalPlan = rows.fold<int>(
+                                      0,
+                                      (a, b) => a + b.plan,
+                                    );
+                                    final totalAsign = rows.fold<int>(
+                                      0,
+                                      (a, b) => a + b.asignada,
+                                    );
+
+                                    final hasSelection = _selected.isNotEmpty;
+
+                                    return Column(
+                                      children: [
+                                        // Totales + acciones
+                                        Row(
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                'Total plan: $totalPlan  •  Asignada: $totalAsign',
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
                                             ),
-                                            onPressed: () => _printPdf(rows),
-                                            icon: const Icon(
-                                              Icons.picture_as_pdf_outlined,
+                                            const SizedBox(width: 6),
+                                            Flexible(
+                                              child: Wrap(
+                                                spacing: 6,
+                                                runSpacing: 6,
+                                                children: [
+                                                  OutlinedButton.icon(
+                                                    style:
+                                                        OutlinedButton.styleFrom(
+                                                          visualDensity:
+                                                              VisualDensity
+                                                                  .compact,
+                                                        ),
+                                                    onPressed: () =>
+                                                        _printPdf(rows),
+                                                    icon: const Icon(
+                                                      Icons
+                                                          .picture_as_pdf_outlined,
+                                                    ),
+                                                    label: const Text(
+                                                      'Imprimir PDF',
+                                                    ),
+                                                  ),
+                                                  OutlinedButton.icon(
+                                                    style:
+                                                        OutlinedButton.styleFrom(
+                                                          visualDensity:
+                                                              VisualDensity
+                                                                  .compact,
+                                                        ),
+                                                    onPressed: () =>
+                                                        _copyCsv(rows),
+                                                    icon: const Icon(
+                                                      Icons.copy,
+                                                    ),
+                                                    label: const Text(
+                                                      'Copiar CSV',
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
-                                            label: const Text('Imprimir PDF'),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 8),
+
+                                        // Semáforo
+                                        Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: Wrap(
+                                            spacing: 8,
+                                            runSpacing: 6,
+                                            children: [
+                                              _chip(
+                                                'OK ${rows.where((r) => r.asignada >= r.plan).length}',
+                                                color: Colors.green.withOpacity(
+                                                  .12,
+                                                ),
+                                                textColor:
+                                                    Colors.green.shade800,
+                                              ),
+                                              _chip(
+                                                'Parcial ${rows.where((r) => r.asignada > 0 && r.asignada < r.plan).length}',
+                                                color: Colors.orange
+                                                    .withOpacity(.12),
+                                                textColor:
+                                                    Colors.orange.shade800,
+                                              ),
+                                              _chip(
+                                                'Sin asignar ${rows.where((r) => r.asignada == 0).length}',
+                                                color: Colors.red.withOpacity(
+                                                  .12,
+                                                ),
+                                                textColor: Colors.red.shade800,
+                                              ),
+                                            ],
                                           ),
-                                          OutlinedButton.icon(
-                                            style: OutlinedButton.styleFrom(
-                                              visualDensity:
-                                                  VisualDensity.compact,
+                                        ),
+                                        const SizedBox(height: 8),
+
+                                        // Filtros
+                                        Row(
+                                          children: [
+                                            Expanded(
+                                              child: ValueListenableBuilder<bool>(
+                                                valueListenable:
+                                                    _onlyMaterialPending,
+                                                builder: (_, v, __) =>
+                                                    CheckboxListTile(
+                                                      dense: true,
+                                                      contentPadding:
+                                                          EdgeInsets.zero,
+                                                      value: v,
+                                                      onChanged: (nv) => setState(
+                                                        () =>
+                                                            _onlyMaterialPending
+                                                                    .value =
+                                                                nv ?? false,
+                                                      ),
+                                                      title: const Text(
+                                                        'Sólo material pendiente',
+                                                      ),
+                                                      controlAffinity:
+                                                          ListTileControlAffinity
+                                                              .leading,
+                                                    ),
+                                              ),
                                             ),
-                                            onPressed: () => _copyCsv(rows),
-                                            icon: const Icon(Icons.copy),
-                                            label: const Text('Copiar CSV'),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-
-                                // Semáforo
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Wrap(
-                                    spacing: 8,
-                                    runSpacing: 6,
-                                    children: [
-                                      _chip(
-                                        'OK ${rows.where((r) => r.asignada >= r.plan).length}',
-                                        color: Colors.green.withOpacity(.12),
-                                        textColor: Colors.green.shade800,
-                                      ),
-                                      _chip(
-                                        'Parcial ${rows.where((r) => r.asignada > 0 && r.asignada < r.plan).length}',
-                                        color: Colors.orange.withOpacity(.12),
-                                        textColor: Colors.orange.shade800,
-                                      ),
-                                      _chip(
-                                        'Sin asignar ${rows.where((r) => r.asignada == 0).length}',
-                                        color: Colors.red.withOpacity(.12),
-                                        textColor: Colors.red.shade800,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-
-                                // Filtros
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: ValueListenableBuilder<bool>(
-                                        valueListenable: _onlyMaterialPending,
-                                        builder: (_, v, __) => CheckboxListTile(
-                                          dense: true,
-                                          contentPadding: EdgeInsets.zero,
-                                          value: v,
-                                          onChanged: (nv) => setState(
-                                            () => _onlyMaterialPending.value =
-                                                nv ?? false,
-                                          ),
-                                          title: const Text(
-                                            'Sólo material pendiente',
-                                          ),
-                                          controlAffinity:
-                                              ListTileControlAffinity.leading,
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: ValueListenableBuilder<bool>(
+                                                valueListenable:
+                                                    _onlyPurchasePending,
+                                                builder: (_, v, __) =>
+                                                    CheckboxListTile(
+                                                      dense: true,
+                                                      contentPadding:
+                                                          EdgeInsets.zero,
+                                                      value: v,
+                                                      onChanged: (nv) => setState(
+                                                        () =>
+                                                            _onlyPurchasePending
+                                                                    .value =
+                                                                nv ?? false,
+                                                      ),
+                                                      title: const Text(
+                                                        'Sólo pendiente de compra',
+                                                      ),
+                                                      controlAffinity:
+                                                          ListTileControlAffinity
+                                                              .leading,
+                                                    ),
+                                              ),
+                                            ),
+                                          ],
                                         ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: ValueListenableBuilder<bool>(
-                                        valueListenable: _onlyNestingPending,
-                                        builder: (_, v, __) => CheckboxListTile(
-                                          dense: true,
-                                          contentPadding: EdgeInsets.zero,
-                                          value: v,
-                                          onChanged: (nv) => setState(
-                                            () => _onlyNestingPending.value =
-                                                nv ?? false,
-                                          ),
-                                          title: const Text(
-                                            'Sólo nesting pendiente/en proceso',
-                                          ),
-                                          controlAffinity:
-                                              ListTileControlAffinity.leading,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 6),
+                                        const SizedBox(height: 6),
 
-                                // Botones de agrupado (solo si hay selección)
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Wrap(
-                                    spacing: 8,
-                                    children: [
-                                      ElevatedButton.icon(
-                                        onPressed: hasSelection
-                                            ? () => _bulkGroup(rows)
-                                            : null,
-                                        icon: const Icon(Icons.group_add),
-                                        label: const Text(
-                                          'Agrupar seleccionadas',
-                                        ),
-                                      ),
-                                      OutlinedButton.icon(
-                                        onPressed: hasSelection
-                                            ? () => _bulkUngroup(rows)
-                                            : null,
-                                        icon: const Icon(Icons.group_off),
-                                        label: const Text('Quitar grupo'),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-
-                                Expanded(
-                                  child: rows.isEmpty
-                                      ? const Center(
-                                          child: Text(
-                                            'BOM vacío con los filtros actuales.',
+                                        // Agrupado
+                                        Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: Wrap(
+                                            spacing: 8,
+                                            children: [
+                                              ElevatedButton.icon(
+                                                onPressed: hasSelection
+                                                    ? () => _bulkGroup(rows)
+                                                    : null,
+                                                icon: const Icon(
+                                                  Icons.group_add,
+                                                ),
+                                                label: const Text(
+                                                  'Agrupar seleccionadas',
+                                                ),
+                                              ),
+                                              OutlinedButton.icon(
+                                                onPressed: hasSelection
+                                                    ? () => _bulkUngroup(rows)
+                                                    : null,
+                                                icon: const Icon(
+                                                  Icons.group_off,
+                                                ),
+                                                label: const Text(
+                                                  'Quitar grupo',
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                        )
-                                      : ListView.separated(
-                                          itemCount: rows.length,
-                                          separatorBuilder: (_, __) =>
-                                              const SizedBox(height: 10),
-                                          itemBuilder: (_, i) =>
-                                              _itemCard(rows[i]),
                                         ),
-                                ),
-                              ],
+                                        const SizedBox(height: 8),
+
+                                        Expanded(
+                                          child: rows.isEmpty
+                                              ? const Center(
+                                                  child: Text(
+                                                    'BOM vacío con los filtros actuales.',
+                                                  ),
+                                                )
+                                              : ListView.separated(
+                                                  itemCount: rows.length,
+                                                  separatorBuilder: (_, __) =>
+                                                      const SizedBox(
+                                                        height: 10,
+                                                      ),
+                                                  itemBuilder: (_, i) =>
+                                                      _itemCard(rows[i], mats),
+                                                ),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                );
+                              },
                             );
                           },
                         );
@@ -645,9 +825,10 @@ class _BomScreenState extends State<BomScreen> {
     );
   }
 
-  // ---------- UI helpers ----------
-  Widget _itemCard(_BomRow r) {
+  Widget _itemCard(_BomRow r, List<_MaterialDoc> mats) {
     final isSelected = _selected.contains(r.id);
+    final Color? materialColor = _parseColorHex(r.materialColorHex);
+
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -679,7 +860,7 @@ class _BomScreenState extends State<BomScreen> {
                 ),
                 IconButton(
                   tooltip: 'Editar',
-                  onPressed: () => _editPart(r),
+                  onPressed: () => _editPart(r, mats),
                   icon: const Icon(Icons.edit),
                 ),
               ],
@@ -693,7 +874,7 @@ class _BomScreenState extends State<BomScreen> {
                 ),
               ),
 
-            // Chips plan/asign/faltan
+            // Chips plan/asign/faltan + grupo
             Padding(
               padding: const EdgeInsets.only(left: 12, bottom: 6, right: 4),
               child: Wrap(
@@ -713,7 +894,7 @@ class _BomScreenState extends State<BomScreen> {
               ),
             ),
 
-            // Estatus + material + proveedor + nesting
+            // Estatus COMPRA + proveedor
             Padding(
               padding: const EdgeInsets.only(left: 12, bottom: 4),
               child: Wrap(
@@ -721,45 +902,274 @@ class _BomScreenState extends State<BomScreen> {
                 runSpacing: 6,
                 children: [
                   _chip(
-                    _statusLabel(r.nestStatus),
-                    color: _statusColor(r.nestStatus).withOpacity(.12),
-                    textColor: _statusColor(r.nestStatus),
-                  ),
-                  _chip(
-                    r.materialComprado
-                        ? (r.materialCompradoFecha == null
-                              ? 'Material: Comprado'
-                              : 'Material: Comprado ${DateFormat('yyyy-MM-dd').format(r.materialCompradoFecha!.toDate())}')
-                        : 'Material: Pendiente',
+                    r.materialComprado ? 'Comprado' : 'Pendiente',
                     color: (r.materialComprado ? Colors.green : Colors.red)
                         .withOpacity(.12),
                     textColor: r.materialComprado
                         ? Colors.green.shade800
                         : Colors.red.shade800,
                   ),
-                  if (r.proveedor.trim().isNotEmpty)
+                  if (r.materialComprado && r.materialCompradoFecha != null)
                     _chip(
-                      'Proveedor: ${r.proveedor.trim()}',
+                      DateFormat(
+                        'yyyy-MM-dd',
+                      ).format(r.materialCompradoFecha!.toDate()),
+                      color: Colors.blueGrey.withOpacity(.10),
+                      textColor: Colors.blueGrey.shade800,
+                    ),
+                  if (r.proveedorMostrar.trim().isNotEmpty)
+                    _chip(
+                      'Proveedor: ${r.proveedorMostrar}',
                       color: Colors.blueGrey.withOpacity(.10),
                       textColor: Colors.blueGrey.shade800,
                     ),
                 ],
               ),
             ),
-            if (r.nesting.trim().isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 12, top: 2),
-                child: Text(
-                  'Nesting: ${r.nesting}',
-                  style: const TextStyle(color: Colors.black87),
-                ),
+
+            // Material + Dimensión
+            Padding(
+              padding: const EdgeInsets.only(left: 12, top: 2),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (r.materialLabel.isNotEmpty)
+                    Row(
+                      children: [
+                        if (materialColor != null)
+                          Container(
+                            width: 10,
+                            height: 10,
+                            margin: const EdgeInsets.only(right: 6),
+                            decoration: BoxDecoration(
+                              color: materialColor,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                        Expanded(
+                          child: Text(
+                            'Material: ${r.materialLabel}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  if (r.nestDim.trim().isNotEmpty)
+                    Text(
+                      'Dimensión: ${r.nestDim}',
+                      style: const TextStyle(color: Colors.black87),
+                    ),
+                ],
               ),
+            ),
           ],
         ),
       ),
     );
   }
 
+  // ---------- Editar ----------
+  Future<void> _editPart(_BomRow r, List<_MaterialDoc> mats) async {
+    final dimCtrl = TextEditingController(text: r.nestDim);
+
+    // material seleccionado (trata de encontrar por label)
+    String? materialId;
+    if (r.materialLabel.isNotEmpty) {
+      final found = mats.firstWhere(
+        (m) => '${m.code} · ${m.desc}' == r.materialLabel,
+        orElse: () => _MaterialDoc.empty(),
+      );
+      materialId = found.isValid ? found.id : null;
+    }
+
+    bool comprado = r.materialComprado;
+    Timestamp? fecha = r.materialCompradoFecha;
+
+    // catálogo de proveedores
+    final proveedores = await _suppliersFuture;
+    String? supplierId;
+    // si hay nombre mostrado, intenta empatar
+    final match = proveedores.firstWhere(
+      (s) => s.name.toLowerCase() == r.proveedorMostrar.toLowerCase(),
+      orElse: () => _SupplierDoc.empty(),
+    );
+    if (match.isValid) supplierId = match.id;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+              top: 8,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    r.numero,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Dimensión
+                  TextField(
+                    controller: dimCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Dimensión / Nesting',
+                      hintText: 'p.ej. bloque 4x4x4',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Material
+                  DropdownButtonFormField<String>(
+                    value: materialId,
+                    isExpanded: true,
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: null,
+                        child: Text('— Material —'),
+                      ),
+                      ...mats.map(
+                        (m) => DropdownMenuItem<String>(
+                          value: m.id,
+                          child: Text('${m.code} · ${m.desc}'),
+                        ),
+                      ),
+                    ],
+                    onChanged: (v) => materialId = v,
+                    decoration: const InputDecoration(
+                      labelText: 'Material',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Estatus de COMPRA
+                  SwitchListTile.adaptive(
+                    title: const Text('Material comprado'),
+                    value: comprado,
+                    onChanged: (v) => setState(() => comprado = v),
+                  ),
+                  if (comprado) ...[
+                    DropdownButtonFormField<String>(
+                      value: supplierId,
+                      isExpanded: true,
+                      items: [
+                        const DropdownMenuItem<String>(
+                          value: null,
+                          child: Text('— Seleccionar proveedor —'),
+                        ),
+                        ...proveedores.map(
+                          (s) => DropdownMenuItem<String>(
+                            value: s.id,
+                            child: Text(s.name),
+                          ),
+                        ),
+                      ],
+                      onChanged: (v) => supplierId = v,
+                      decoration: const InputDecoration(
+                        labelText: 'Proveedor',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        fecha == null
+                            ? 'Fecha de compra: (toca para elegir)'
+                            : 'Fecha de compra: ${DateFormat('yyyy-MM-dd').format(fecha!.toDate())}',
+                      ),
+                      trailing: const Icon(Icons.event),
+                      onTap: () async {
+                        final now = DateTime.now();
+                        final picked = await showDatePicker(
+                          context: ctx,
+                          initialDate: fecha?.toDate() ?? now,
+                          firstDate: DateTime(now.year - 5),
+                          lastDate: DateTime(now.year + 5),
+                        );
+                        if (picked != null) {
+                          setState(() => fecha = Timestamp.fromDate(picked));
+                        }
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+
+                  FilledButton.icon(
+                    onPressed: () async {
+                      try {
+                        final data = <String, dynamic>{
+                          'nestDim': dimCtrl.text.trim(),
+                          'materialComprado': comprado,
+                          'materialCompradoFecha': comprado ? fecha : null,
+                        };
+
+                        // material
+                        if (materialId == null) {
+                          data['materialRef'] = FieldValue.delete();
+                          data['materialCode'] = FieldValue.delete();
+                        } else {
+                          final matRef = FirebaseFirestore.instance
+                              .collection('materials')
+                              .doc(materialId);
+                          final matSnap = await matRef.get();
+                          data['materialRef'] = matRef;
+                          data['materialCode'] = (matSnap.data()?['code'] ?? '')
+                              .toString();
+                        }
+
+                        // proveedor (sólo si comprado)
+                        if (comprado && supplierId != null) {
+                          final supRef = FirebaseFirestore.instance
+                              .collection('suppliers')
+                              .doc(supplierId);
+                          final supSnap = await supRef.get();
+                          final supName = (supSnap.data()?['name'] ?? '')
+                              .toString();
+                          data['supplierRef'] = supRef;
+                          data['proveedor'] =
+                              supName; // opcional, fácil de exportar
+                        } else {
+                          data['supplierRef'] = FieldValue.delete();
+                          data['proveedor'] = FieldValue.delete();
+                        }
+
+                        await r.ref.update(data);
+                        if (mounted) Navigator.pop(ctx);
+                      } catch (e) {
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error al guardar: $e')),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.save),
+                    label: const Text('Guardar'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------- Helpers de UI ----------
   Widget _chip(String text, {Color? color, Color? textColor}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -799,168 +1209,16 @@ class _BomScreenState extends State<BomScreen> {
     return _chip('Faltan $falt', color: c.withOpacity(.12), textColor: c);
   }
 
-  static String _statusLabel(String s) {
-    switch (s) {
-      case 'completo':
-        return 'Completo';
-      case 'en proceso':
-        return 'En proceso';
-      default:
-        return 'Pendiente';
-    }
-  }
-
-  static Color _statusColor(String s) {
-    switch (s) {
-      case 'completo':
-        return Colors.green.shade700;
-      case 'en proceso':
-        return Colors.orange.shade700;
-      default:
-        return Colors.red.shade700;
-    }
-  }
-
-  Future<void> _editPart(_BomRow r) async {
-    final nestingCtrl = TextEditingController(text: r.nesting);
-    final groupCtrl = TextEditingController(text: r.nestGroup);
-    String status = r.nestStatus;
-    bool comprado = r.materialComprado;
-    Timestamp? fecha = r.materialCompradoFecha;
-    final proveedorCtrl = TextEditingController(text: r.proveedor);
-
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (ctx) {
-        return SafeArea(
-          child: Padding(
-            padding: EdgeInsets.only(
-              left: 16,
-              right: 16,
-              bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
-              top: 8,
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    r.numero,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: nestingCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Nesting (p.ej. bloque 4x4x4 / A36)',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: groupCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Nombre de grupo (opcional)',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    value: status,
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'pendiente',
-                        child: Text('Pendiente'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'en proceso',
-                        child: Text('En proceso'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'completo',
-                        child: Text('Completo'),
-                      ),
-                    ],
-                    onChanged: (v) => status = v ?? 'pendiente',
-                    decoration: const InputDecoration(
-                      labelText: 'Estatus nesting',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  SwitchListTile.adaptive(
-                    title: const Text('Material comprado'),
-                    value: comprado,
-                    onChanged: (v) => setState(() => comprado = v),
-                  ),
-                  if (comprado) ...[
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        fecha == null
-                            ? 'Fecha de compra: (toca para elegir)'
-                            : 'Fecha de compra: ${DateFormat('yyyy-MM-dd').format(fecha!.toDate())}',
-                      ),
-                      trailing: const Icon(Icons.event),
-                      onTap: () async {
-                        final now = DateTime.now();
-                        final picked = await showDatePicker(
-                          context: ctx,
-                          initialDate: fecha?.toDate() ?? now,
-                          firstDate: DateTime(now.year - 5),
-                          lastDate: DateTime(now.year + 5),
-                        );
-                        if (picked != null) {
-                          setState(() => fecha = Timestamp.fromDate(picked));
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 6),
-                    TextField(
-                      controller: proveedorCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Proveedor',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 14),
-                  FilledButton.icon(
-                    onPressed: () async {
-                      try {
-                        await r.ref.update({
-                          'nesting': nestingCtrl.text.trim(),
-                          'nestGroup': groupCtrl.text.trim(),
-                          'nestStatus': status,
-                          'materialComprado': comprado,
-                          'materialCompradoFecha': comprado ? fecha : null,
-                          'proveedor': comprado
-                              ? proveedorCtrl.text.trim()
-                              : '',
-                        });
-                        if (mounted) Navigator.pop(ctx);
-                      } catch (e) {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Error al guardar: $e')),
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.save),
-                    label: const Text('Guardar'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+  Color? _parseColorHex(String? hex) {
+    if (hex == null || hex.isEmpty) return null;
+    final clean = hex.replaceFirst('#', '');
+    if (clean.length != 6 && clean.length != 8) return null;
+    final value = int.tryParse(
+      clean.length == 6 ? 'FF$clean' : clean,
+      radix: 16,
     );
+    if (value == null) return null;
+    return Color(value);
   }
 }
 
@@ -970,11 +1228,13 @@ class _PartDoc {
   final String numero;
   final String descr;
   final int plan;
-  final String nesting;
-  final String nestStatus;
+  final String nestDim;
   final bool materialComprado;
   final Timestamp? materialCompradoFecha;
-  final String proveedor;
+  final String materialCode;
+  final DocumentReference? materialRef;
+  final String proveedorTexto;
+  final DocumentReference? supplierRef;
   final String nestGroup;
   final DocumentReference docRef;
 
@@ -983,11 +1243,13 @@ class _PartDoc {
     required this.numero,
     required this.descr,
     required this.plan,
-    required this.nesting,
-    required this.nestStatus,
+    required this.nestDim,
     required this.materialComprado,
     required this.materialCompradoFecha,
-    required this.proveedor,
+    required this.materialCode,
+    required this.materialRef,
+    required this.proveedorTexto,
+    required this.supplierRef,
     required this.nestGroup,
     required this.docRef,
   });
@@ -999,12 +1261,13 @@ class _BomRow {
   final String descr;
   final int plan;
   final int asignada;
-  final String nesting;
+  final String nestDim;
   final String nestGroup;
-  final String nestStatus;
+  final String materialLabel;
+  final String? materialColorHex;
   final bool materialComprado;
   final Timestamp? materialCompradoFecha;
-  final String proveedor;
+  final String proveedorMostrar;
   final DocumentReference ref;
 
   _BomRow({
@@ -1013,12 +1276,49 @@ class _BomRow {
     required this.descr,
     required this.plan,
     required this.asignada,
-    required this.nesting,
+    required this.nestDim,
     required this.nestGroup,
-    required this.nestStatus,
+    required this.materialLabel,
+    required this.materialColorHex,
     required this.materialComprado,
     required this.materialCompradoFecha,
-    required this.proveedor,
+    required this.proveedorMostrar,
     required this.ref,
   });
+}
+
+class _MaterialDoc {
+  final String id;
+  final String code;
+  final String desc;
+  final String colorHex;
+  final DocumentReference ref;
+  const _MaterialDoc({
+    required this.id,
+    required this.code,
+    required this.desc,
+    required this.colorHex,
+    required this.ref,
+  });
+  static _MaterialDoc empty() => _MaterialDoc(
+    id: '',
+    code: '',
+    desc: '',
+    colorHex: '',
+    ref: FirebaseFirestore.instance.doc('_/x'),
+  );
+  bool get isValid => id.isNotEmpty;
+}
+
+class _SupplierDoc {
+  final String id;
+  final String name;
+  final DocumentReference ref;
+  const _SupplierDoc({required this.id, required this.name, required this.ref});
+  static _SupplierDoc empty() => _SupplierDoc(
+    id: '',
+    name: '',
+    ref: FirebaseFirestore.instance.doc('_/x'),
+  );
+  bool get isValid => id.isNotEmpty;
 }
