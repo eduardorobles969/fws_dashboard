@@ -1,25 +1,15 @@
+// lib/screens/new_project_part_screen.dart
 import 'dart:io' show File;
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
-/// Alta de proyecto y carga masiva de números de parte.
-/// - Puede crear proyecto nuevo o agregar partes a uno existente.
-/// - Pegar lista masiva: "PN | Descripción | BOM | Nesting1 | Nesting2"
-///   (también con coma o TAB; las columnas 3, 4 y 5 son opcionales)
-/// - Cada parte ahora trae:
-///   * cantidadPlan (BOM)
-///   * nesting1, nesting2 (texto)
-///   * plano (jpg/pdf)
-///   * sólidos (x_t/step, múltiples)
-/// - Archivos se suben a Storage y se guardan sus URLs en el doc.
 class NewProjectPartScreen extends StatefulWidget {
   const NewProjectPartScreen({super.key});
-
   @override
   State<NewProjectPartScreen> createState() => _NewProjectPartScreenState();
 }
@@ -27,103 +17,73 @@ class NewProjectPartScreen extends StatefulWidget {
 class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   final _form = GlobalKey<FormState>();
 
-  /// null => crear proyecto nuevo; de lo contrario, id de proyecto existente
+  // null => crear proyecto; otro => id de proyecto existente
   String? _selectedProjectId;
 
-  // Campos de proyecto (solo visibles si es nuevo)
+  // Campos si es proyecto nuevo
   final _proyectoCtrl = TextEditingController();
   final _descProyectoCtrl = TextEditingController();
 
   bool _saving = false;
 
-  /// Filas dinámicas de números de parte
+  /// Filas dinámicas
   final List<_PartRow> _rows = [_PartRow()];
 
-  // =================== DATA ===================
-
-  /// Proyectos activos para el dropdown
+  // ---------- DATA ----------
   Future<List<Map<String, dynamic>>> _getProjects() async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
         .where('activo', isEqualTo: true)
         .orderBy('proyecto')
         .get();
-
     return qs.docs
-        .map((d) => {'id': d.id, 'proyecto': (d['proyecto'] ?? '') as String})
+        .map((d) => {'id': d.id, 'proyecto': (d['proyecto'] ?? '').toString()})
         .toList();
   }
 
-  /// Obtiene TODOS los PN existentes en el proyecto (para deduplicar rápido)
-  Future<Set<String>> _getExistingPartNumbers(String projectId) async {
+  Future<Set<String>> _getExistingPN(String projectId) async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
         .doc(projectId)
         .collection('parts')
         .get();
-
     return qs.docs
         .map((d) => (d.data()['numeroParte'] ?? '').toString().toUpperCase())
         .where((s) => s.isNotEmpty)
         .toSet();
   }
 
-  // =================== HELPERS ===================
+  // ---------- HELPERS ----------
+  String _normPN(String s) =>
+      s.trim().replaceAll(RegExp(r'\s+'), ' ').toUpperCase();
 
-  /// Normaliza el PN para mantener consistencia
-  String _normPN(String s) {
-    final trimmed = s.trim();
-    // colapsar espacios múltiples y llevar a mayúsculas
-    return trimmed.replaceAll(RegExp(r'\s+'), ' ').toUpperCase();
-  }
-
-  /// Intenta parsear varias líneas pegadas:
-  /// Soporta separadores |  ,  TAB
-  /// Columnas: PN | Descripción | BOM | Nesting1 | Nesting2  (3..5 columnas)
   List<_ParsedLine> _parseBulk(String raw) {
-    final lines = raw.split('\n');
     final out = <_ParsedLine>[];
-    for (final line in lines) {
+    for (final line in raw.split('\n')) {
       final clean = line.trim();
       if (clean.isEmpty) continue;
 
-      List<String> cols;
-      if (clean.contains('|')) {
-        cols = clean.split('|');
-      } else if (clean.contains('\t')) {
-        cols = clean.split('\t');
-      } else if (clean.contains(',')) {
-        cols = clean.split(',');
+      List<String> parts;
+      final byPipe = clean.split('|');
+      final byComma = clean.split(',');
+      final byTab = clean.split('\t');
+      if (byPipe.length >= 2) {
+        parts = [byPipe[0], byPipe.sublist(1).join('|')];
+      } else if (byComma.length >= 2) {
+        parts = [byComma[0], byComma.sublist(1).join(',')];
+      } else if (byTab.length >= 2) {
+        parts = [byTab[0], byTab.sublist(1).join('\t')];
       } else {
-        cols = [clean]; // solo PN
+        parts = [clean, ''];
       }
-
-      // normaliza: recorta espacios de cada celda
-      cols = cols.map((c) => c.trim()).toList();
-
-      final pn = _normPN(cols.isNotEmpty ? cols[0] : '');
-      if (pn.isEmpty) continue;
-
-      final desc = cols.length >= 2 ? cols[1] : '';
-      final qty = (cols.length >= 3 ? int.tryParse(cols[2]) : null) ?? 0;
-      final nesting1 = cols.length >= 4 ? cols[3] : '';
-      final nesting2 = cols.length >= 5 ? cols[4] : '';
-
-      out.add(
-        _ParsedLine(
-          pn: pn,
-          desc: desc,
-          qty: qty,
-          nesting1: nesting1,
-          nesting2: nesting2,
-        ),
-      );
+      final pn = _normPN(parts[0]);
+      final desc = parts[1].trim();
+      if (pn.isNotEmpty) out.add(_ParsedLine(pn: pn, desc: desc));
     }
     return out;
   }
 
-  // =================== STORAGE ===================
-
+  // ---------- STORAGE ----------
   Future<String> _uploadFile({
     required String projectId,
     required String partDocId,
@@ -131,49 +91,29 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     required String kind, // 'drawing' | 'solids'
   }) async {
     final storage = FirebaseStorage.instance;
-    final safeName = (file.name).replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
+    final safeName = file.name.replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
     final path = 'projects/$projectId/parts/$partDocId/$kind/$safeName';
     final ref = storage.ref().child(path);
-
     UploadTask task;
     if (kIsWeb) {
       task = ref.putData(file.bytes!);
     } else {
       task = ref.putFile(File(file.path!));
     }
-
     final snap = await task.whenComplete(() {});
-    return await snap.ref.getDownloadURL();
+    return snap.ref.getDownloadURL();
   }
 
-  void _snack(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-
-  // =================== SAVE ===================
-
+  // ---------- SAVE ----------
   Future<void> _save() async {
     if (!_form.currentState!.validate()) return;
 
-    // 1) Recolectar filas no vacías y normalizadas
+    // 1) recolectar
     final entered = <_ParsedLine>[];
     for (final r in _rows) {
-      final pn = _normPN(r.numeroCtrl.text);
-      final desc = r.descCtrl.text.trim();
-      // si hay qty/nesting escritos en UI, los tomamos
-      final qtyUI = int.tryParse(r.cantidadCtrl.text.trim());
-      final nesting1UI = r.nesting1Ctrl.text.trim();
-      final nesting2UI = r.nesting2Ctrl.text.trim();
-
+      final pn = _normPN(r.pn.text);
       if (pn.isNotEmpty) {
-        entered.add(
-          _ParsedLine(
-            pn: pn,
-            desc: desc,
-            qty: qtyUI ?? 0,
-            nesting1: nesting1UI,
-            nesting2: nesting2UI,
-          ),
-        );
+        entered.add(_ParsedLine(pn: pn, desc: r.desc.text.trim()));
       }
     }
     if (entered.isEmpty) {
@@ -182,13 +122,12 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
     }
 
     setState(() => _saving = true);
-
     try {
-      // 2) Proyecto destino (crea si no existe)
-      DocumentReference projRef;
+      // 2) proyecto
+      late DocumentReference projRef;
       if (_selectedProjectId == null) {
         if (_proyectoCtrl.text.trim().isEmpty) {
-          _snack('Nombre de proyecto requerido.');
+          _snack('Nombre del proyecto requerido.');
           setState(() => _saving = false);
           return;
         }
@@ -205,70 +144,73 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             .doc(_selectedProjectId);
       }
 
-      // 3) Deduplicar internos
-      final uniqueMap = <String, _ParsedLine>{};
-      for (final p in entered) {
-        uniqueMap[p.pn] = p; // la última línea para mismo PN gana
-      }
-      final uniqueList = uniqueMap.values.toList();
+      // 3) dedup internos
+      final map = <String, _ParsedLine>{};
+      for (final e in entered) map[e.pn] = e;
+      final unique = map.values.toList();
 
-      // 4) Deduplicar contra Firestore si aplica
+      // 4) dedup contra firestore
       final existing = _selectedProjectId != null
-          ? await _getExistingPartNumbers(projRef.id)
+          ? await _getExistingPN(projRef.id)
           : <String>{};
 
-      // 5) Transformar a _PendingPart y guardar
-      int ok = 0;
-      for (final parsed in uniqueList) {
-        if (existing.contains(parsed.pn)) continue;
+      final toInsert = <_PendingPart>[];
+      for (final p in unique) {
+        if (existing.contains(p.pn)) continue;
 
-        // localiza la fila UI real (para archivos)
+        // recuperar fila original para qty/nesting/archivos
         final row = _rows.firstWhere(
-          (r) => _normPN(r.numeroCtrl.text) == parsed.pn,
+          (r) => _normPN(r.pn.text) == p.pn,
           orElse: () => _PartRow(),
         );
 
-        final qty =
-            (int.tryParse(row.cantidadCtrl.text.trim()) ??
-            parsed.qty); // prioridad UI
-        final nesting1 =
-            (row.nesting1Ctrl.text.trim().isNotEmpty
-                    ? row.nesting1Ctrl.text
-                    : parsed.nesting1)
-                .trim();
-        final nesting2 =
-            (row.nesting2Ctrl.text.trim().isNotEmpty
-                    ? row.nesting2Ctrl.text
-                    : parsed.nesting2)
-                .trim();
+        toInsert.add(
+          _PendingPart(
+            pn: p.pn,
+            desc: p.desc,
+            qty: math.max(0, int.tryParse(row.qty.text.trim()) ?? 0),
+            nesting: row.nesting.text.trim(),
+            drawing: row.drawing,
+            solids: List<PlatformFile>.from(row.solids),
+          ),
+        );
+      }
 
+      if (toInsert.isEmpty) {
+        _snack('No hay partes nuevas (todas duplicadas).');
+        return;
+      }
+
+      // 5) guardar + uploads
+      int ok = 0;
+      for (final p in toInsert) {
         final pRef = projRef.collection('parts').doc();
         await pRef.set({
-          'numeroParte': parsed.pn,
-          'descripcionParte': parsed.desc,
-          'cantidadPlan': math.max(0, qty),
-          if (nesting1.isNotEmpty) 'nesting1': nesting1,
-          if (nesting2.isNotEmpty) 'nesting2': nesting2,
+          'numeroParte': p.pn,
+          'descripcionParte': p.desc,
+          'cantidadPlan': p.qty,
+          'nesting': p.nesting, // texto libre
+          'nestGroupId': null, // se asigna en BOM al agrupar
+          'nestStatus': 'pendiente', // se gestiona en BOM
+          'materialComprado': false, // se gestiona en BOM
           'activo': true,
           'createdAt': FieldValue.serverTimestamp(),
         });
 
-        // Upload plano (opcional)
         String? drawingUrl, drawingName;
-        if (row.drawing != null) {
+        if (p.drawing != null) {
           drawingUrl = await _uploadFile(
             projectId: projRef.id,
             partDocId: pRef.id,
-            file: row.drawing!,
+            file: p.drawing!,
             kind: 'drawing',
           );
-          drawingName = row.drawing!.name;
+          drawingName = p.drawing!.name;
         }
 
-        // Upload sólidos (opcional, múltiples)
         final solidUrls = <String>[];
         final solidNames = <String>[];
-        for (final s in row.solids) {
+        for (final s in p.solids) {
           final url = await _uploadFile(
             projectId: projRef.id,
             partDocId: pRef.id,
@@ -287,7 +229,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             if (solidUrls.isNotEmpty) 'solidNames': solidNames,
           });
         }
-
         ok++;
       }
 
@@ -295,24 +236,23 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       _snack('Guardadas $ok parte(s).');
       Navigator.pop(context);
     } catch (e) {
-      if (!mounted) return;
-      _snack('Error: $e');
+      if (mounted) _snack('Error: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
-  // =================== UI ===================
-
+  // ---------- UI ----------
   @override
   void dispose() {
     _proyectoCtrl.dispose();
     _descProyectoCtrl.dispose();
-    for (final r in _rows) {
-      r.dispose();
-    }
+    for (final r in _rows) r.dispose();
     super.dispose();
   }
+
+  void _snack(String m) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
   @override
   Widget build(BuildContext context) {
@@ -323,15 +263,14 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         child: FutureBuilder<List<Map<String, dynamic>>>(
           future: _getProjects(),
           builder: (context, snap) {
-            final projects = (snap.data ?? const <Map<String, dynamic>>[]);
-
+            final projects = snap.data ?? const [];
             return Padding(
               padding: const EdgeInsets.all(16),
               child: Form(
                 key: _form,
                 child: ListView(
                   children: [
-                    // Selector de proyecto
+                    // Proyecto
                     InputDecorator(
                       decoration: const InputDecoration(
                         labelText: 'Proyecto',
@@ -340,14 +279,14 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                       child: DropdownButtonHideUnderline(
                         child: DropdownButton<String?>(
                           isExpanded: true,
-                          value: _selectedProjectId, // null = nuevo
+                          value: _selectedProjectId,
                           items: [
                             const DropdownMenuItem<String?>(
                               value: null,
                               child: Text('➕ Nuevo proyecto…'),
                             ),
                             ...projects.map(
-                              (p) => DropdownMenuItem<String?>(
+                              (p) => DropdownMenuItem(
                                 value: p['id'] as String,
                                 child: Text(p['proyecto'] as String),
                               ),
@@ -365,7 +304,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Campos de proyecto (solo si es nuevo)
                     if (_selectedProjectId == null) ...[
                       TextFormField(
                         controller: _proyectoCtrl,
@@ -374,7 +312,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                           border: OutlineInputBorder(),
                         ),
                         validator: (v) => (v == null || v.trim().isEmpty)
-                            ? 'Requerido para proyecto nuevo'
+                            ? 'Requerido'
                             : null,
                       ),
                       const SizedBox(height: 8),
@@ -389,7 +327,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                       const Divider(),
                     ],
 
-                    const SizedBox(height: 8),
                     Row(
                       children: [
                         const Expanded(
@@ -401,7 +338,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                             ),
                           ),
                         ),
-                        // Botón "Pegar lista"
                         TextButton.icon(
                           onPressed: () async {
                             final pasted = await showDialog<String>(
@@ -409,24 +345,17 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                               builder: (_) => const _PasteDialog(),
                             );
                             if (pasted == null || pasted.trim().isEmpty) return;
-
                             final parsed = _parseBulk(pasted);
                             if (parsed.isEmpty) {
                               _snack('No se detectaron P/N válidos.');
                               return;
                             }
-
                             setState(() {
                               for (final p in parsed) {
-                                final row = _PartRow();
-                                row.numeroCtrl.text = p.pn;
-                                row.descCtrl.text = p.desc;
-                                if (p.qty > 0) {
-                                  row.cantidadCtrl.text = p.qty.toString();
-                                }
-                                row.nesting1Ctrl.text = p.nesting1;
-                                row.nesting2Ctrl.text = p.nesting2;
-                                _rows.add(row);
+                                final r = _PartRow();
+                                r.pn.text = p.pn;
+                                r.desc.text = p.desc;
+                                _rows.add(r);
                               }
                             });
                           },
@@ -437,13 +366,11 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                     ),
                     const SizedBox(height: 8),
 
-                    // Filas dinámicas
                     ..._rows.asMap().entries.map((e) {
                       final idx = e.key;
                       final row = e.value;
-
                       return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.only(bottom: 14),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -452,7 +379,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 Expanded(
                                   flex: 4,
                                   child: TextFormField(
-                                    controller: row.numeroCtrl,
+                                    controller: row.pn,
                                     textCapitalization:
                                         TextCapitalization.characters,
                                     decoration: InputDecoration(
@@ -460,16 +387,12 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                       border: const OutlineInputBorder(),
                                     ),
                                     onChanged: (v) {
-                                      // normaliza visualmente
-                                      final caret = row.numeroCtrl.selection;
-                                      row.numeroCtrl.value = row
-                                          .numeroCtrl
-                                          .value
-                                          .copyWith(
-                                            text: _normPN(v),
-                                            selection: caret,
-                                            composing: TextRange.empty,
-                                          );
+                                      final caret = row.pn.selection;
+                                      row.pn.value = row.pn.value.copyWith(
+                                        text: _normPN(v),
+                                        selection: caret,
+                                        composing: TextRange.empty,
+                                      );
                                     },
                                     validator: (v) {
                                       if (idx == 0 &&
@@ -484,7 +407,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 Expanded(
                                   flex: 5,
                                   child: TextFormField(
-                                    controller: row.descCtrl,
+                                    controller: row.desc,
                                     decoration: const InputDecoration(
                                       labelText: 'Descripción (opcional)',
                                       border: OutlineInputBorder(),
@@ -495,11 +418,10 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 SizedBox(
                                   width: 110,
                                   child: TextFormField(
-                                    controller: row.cantidadCtrl,
+                                    controller: row.qty,
                                     keyboardType: TextInputType.number,
                                     decoration: const InputDecoration(
-                                      labelText: 'BOM',
-                                      helperText: '',
+                                      labelText: 'Cantidad',
                                       border: OutlineInputBorder(),
                                     ),
                                   ),
@@ -515,36 +437,19 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 ),
                               ],
                             ),
-
                             const SizedBox(height: 8),
-                            // Nesting
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextFormField(
-                                    controller: row.nesting1Ctrl,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Nesting (caso 1)',
-                                      hintText: 'p. ej. bloque 4x4x4 / A36',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: TextFormField(
-                                    controller: row.nesting2Ctrl,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Nesting (caso 2)',
-                                      hintText: 'p. ej. bloque 4x4x16 / A36',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                  ),
-                                ),
-                              ],
+
+                            // Nesting (TEXTO ÚNICO)
+                            TextFormField(
+                              controller: row.nesting,
+                              decoration: const InputDecoration(
+                                labelText: 'Nesting (texto)',
+                                hintText: 'p.ej. “bloque 4x4x4 / A36”',
+                                border: OutlineInputBorder(),
+                              ),
                             ),
-
                             const SizedBox(height: 8),
+
                             // Archivos
                             Wrap(
                               spacing: 8,
@@ -560,12 +465,12 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                             'jpeg',
                                             'pdf',
                                           ],
-                                          withData: kIsWeb, // bytes en web
+                                          withData: kIsWeb,
                                         );
                                     if (pick != null && pick.files.isNotEmpty) {
-                                      setState(() {
-                                        row.drawing = pick.files.first;
-                                      });
+                                      setState(
+                                        () => row.drawing = pick.files.first,
+                                      );
                                     }
                                   },
                                   icon: const Icon(
@@ -589,9 +494,9 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                           withData: kIsWeb,
                                         );
                                     if (pick != null && pick.files.isNotEmpty) {
-                                      setState(() {
-                                        row.solids.addAll(pick.files);
-                                      });
+                                      setState(
+                                        () => row.solids.addAll(pick.files),
+                                      );
                                     }
                                   },
                                   icon: const Icon(Icons.view_in_ar_outlined),
@@ -607,7 +512,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                 ),
                               ],
                             ),
-                            const Divider(height: 20),
+                            const Divider(height: 22),
                           ],
                         ),
                       );
@@ -622,7 +527,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                       ),
                     ),
 
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 8),
                     ElevatedButton.icon(
                       onPressed: _saving ? null : _save,
                       icon: _saving
@@ -645,53 +550,55 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 }
 
-/// Fila de captura + archivos + BOM + Nesting
+// ------- helpers -------
 class _PartRow {
-  final TextEditingController numeroCtrl = TextEditingController();
-  final TextEditingController descCtrl = TextEditingController();
-  final TextEditingController cantidadCtrl = TextEditingController();
-  final TextEditingController nesting1Ctrl = TextEditingController();
-  final TextEditingController nesting2Ctrl = TextEditingController();
+  final TextEditingController pn = TextEditingController();
+  final TextEditingController desc = TextEditingController();
+  final TextEditingController qty = TextEditingController();
+  final TextEditingController nesting = TextEditingController();
 
-  PlatformFile? drawing; // jpg/pdf
-  final List<PlatformFile> solids = []; // x_t / step (múltiples)
+  PlatformFile? drawing;
+  final List<PlatformFile> solids = [];
 
   void dispose() {
-    numeroCtrl.dispose();
-    descCtrl.dispose();
-    cantidadCtrl.dispose();
-    nesting1Ctrl.dispose();
-    nesting2Ctrl.dispose();
+    pn.dispose();
+    desc.dispose();
+    qty.dispose();
+    nesting.dispose();
   }
 }
 
-/// Resultado del parseo de una línea pegada
 class _ParsedLine {
   final String pn;
   final String desc;
+  _ParsedLine({required this.pn, required this.desc});
+}
+
+class _PendingPart {
+  final String pn;
+  final String desc;
   final int qty;
-  final String nesting1;
-  final String nesting2;
-  _ParsedLine({
+  final String nesting;
+  final PlatformFile? drawing;
+  final List<PlatformFile> solids;
+  _PendingPart({
     required this.pn,
     required this.desc,
     required this.qty,
-    required this.nesting1,
-    required this.nesting2,
+    required this.nesting,
+    required this.drawing,
+    required this.solids,
   });
 }
 
-/// Diálogo para pegar texto masivo
 class _PasteDialog extends StatefulWidget {
   const _PasteDialog();
-
   @override
   State<_PasteDialog> createState() => _PasteDialogState();
 }
 
 class _PasteDialogState extends State<_PasteDialog> {
   final _textCtrl = TextEditingController();
-
   @override
   void dispose() {
     _textCtrl.dispose();
@@ -703,18 +610,17 @@ class _PasteDialogState extends State<_PasteDialog> {
     return AlertDialog(
       title: const Text('Pegar lista de P/N'),
       content: SizedBox(
-        width: 520,
+        width: 480,
         child: TextField(
           controller: _textCtrl,
-          maxLines: 12,
+          maxLines: 10,
           decoration: const InputDecoration(
             hintText:
-                'Una por línea. Formatos válidos (usa |, , o TAB):\n'
+                'Una por línea. Formatos:\n'
                 'PN | Descripción\n'
-                'PN | Descripción | BOM\n'
-                'PN | Descripción | BOM | Nesting1\n'
-                'PN | Descripción | BOM | Nesting1 | Nesting2\n'
-                'Ej: BS-0086-EV-001 | Válvula 1 | 3 | bloque 4x4x4 / A36 | bloque 4x4x16 / A36',
+                'PN, Descripción\n'
+                'PN<TAB>Descripción\n'
+                'PN (solo PN)',
             border: OutlineInputBorder(),
           ),
         ),
