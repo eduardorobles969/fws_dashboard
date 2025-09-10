@@ -1,4 +1,4 @@
-import 'dart:io' show File;
+﻿import 'dart:io' show File;
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -8,14 +8,6 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 /// Alta de proyecto y carga masiva de números de parte.
-/// Campos por parte:
-///  - cantidadPlan (Cantidad)
-///  - plano (jpg/pdf)
-///  - sólidos (x_t/step, múltiples)
-///  - nestDim (texto)
-///  - material (catálogo `materials`)
-///     * materialCode (string)
-///     * materialRef (DocumentReference)
 class NewProjectPartScreen extends StatefulWidget {
   const NewProjectPartScreen({super.key});
 
@@ -26,7 +18,6 @@ class NewProjectPartScreen extends StatefulWidget {
 class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   final _form = GlobalKey<FormState>();
 
-  /// null => crear proyecto nuevo; de lo contrario, id de proyecto existente
   String? _selectedProjectId;
 
   // Campos de proyecto (solo visibles si es nuevo)
@@ -48,7 +39,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 
   Future<List<_MaterialDoc>> _getMaterials() async {
-    // Solo orderBy para evitar índice compuesto; filtramos active en memoria.
     final qs = await FirebaseFirestore.instance
         .collection('materials')
         .orderBy('sort')
@@ -73,7 +63,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
 
   // =================== DATA ===================
 
-  /// Proyectos activos para el dropdown
   Future<List<Map<String, dynamic>>> _getProjects() async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
@@ -86,7 +75,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         .toList();
   }
 
-  /// Obtiene TODOS los PN existentes en el proyecto (para deduplicar rápido)
   Future<Set<String>> _getExistingPartNumbers(String projectId) async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
@@ -102,17 +90,11 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
 
   // =================== HELPERS ===================
 
-  /// Normaliza el PN para mantener consistencia
   String _normPN(String s) {
     final trimmed = s.trim();
     return trimmed.replaceAll(RegExp(r'\s+'), ' ').toUpperCase();
   }
 
-  /// Parse de lista pegada. Soporta:
-  /// - PN | Descripción | Cantidad
-  /// - PN, Descripción, Cantidad
-  /// - PN<TAB>Descripción<TAB>Cantidad
-  /// - (versiones con solo PN o PN + Descripción)
   List<_ParsedLine> _parseBulk(String raw) {
     final lines = raw.split('\n');
     final out = <_ParsedLine>[];
@@ -243,6 +225,17 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             int.tryParse(row?.cantidadCtrl.text.trim() ?? '') ?? 0;
         final qty = parsed.qty ?? qtyFromRow;
 
+        final drawingLink = row?.drawingLinkCtrl.text.trim();
+        final solidsLinks = <String>[];
+        final solidsTxt = row?.solidsLinkCtrl.text.trim() ?? '';
+        if (solidsTxt.isNotEmpty) {
+          solidsTxt
+              .split(RegExp(r"[\n,;]+"))
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .forEach(solidsLinks.add);
+        }
+
         toInsert.add(
           _PendingPart(
             pn: parsed.pn,
@@ -252,6 +245,10 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             solids: List<PlatformFile>.from(row?.solids ?? const []),
             nestDim: row?.nestCtrl.text.trim() ?? '',
             materialDocId: row?.materialDocId,
+            drawingLink: (drawingLink != null && drawingLink.isNotEmpty)
+                ? drawingLink
+                : null,
+            solidLinks: solidsLinks,
           ),
         );
       }
@@ -261,7 +258,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         return;
       }
 
-      // Guardado + uploads
       int ok = 0;
       for (final p in toInsert) {
         final pRef = projRef.collection('parts').doc();
@@ -308,13 +304,46 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
           solidNames.add(s.name);
         }
 
-        if (drawingUrl != null || solidUrls.isNotEmpty) {
+        final hasDrawingLink =
+            (p.drawingLink != null && p.drawingLink!.isNotEmpty);
+        final hasSolidLinks = p.solidLinks.isNotEmpty;
+
+        if (drawingUrl != null ||
+            solidUrls.isNotEmpty ||
+            hasDrawingLink ||
+            hasSolidLinks) {
           await pRef.update({
             if (drawingUrl != null) 'drawingUrl': drawingUrl,
             if (drawingUrl != null) 'drawingName': drawingName,
             if (solidUrls.isNotEmpty) 'solidUrls': solidUrls,
             if (solidUrls.isNotEmpty) 'solidNames': solidNames,
+            if (hasDrawingLink) 'drawingLink': p.drawingLink,
+            if (hasSolidLinks) 'solidLinkList': p.solidLinks,
           });
+        }
+
+        if (drawingUrl != null ||
+            solidUrls.isNotEmpty ||
+            hasDrawingLink ||
+            hasSolidLinks) {
+          try {
+            String projectName;
+            if (_selectedProjectId == null) {
+              projectName = _proyectoCtrl.text.trim();
+            } else {
+              final projSnap = await projRef.get();
+              final data = projSnap.data() as Map<String, dynamic>?;
+              projectName = (data?['proyecto'] ?? '').toString();
+            }
+            await _upsertAutoOp(
+              projectRef: projRef,
+              partRef: pRef,
+              projectName: projectName,
+              partNumber: p.pn,
+              opName: 'DIBUJO',
+              status: 'hecho',
+            );
+          } catch (_) {}
         }
         ok++;
       }
@@ -333,7 +362,47 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   void _snack(String msg) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
-  // =================== UI ===================
+  Future<void> _upsertAutoOp({
+    required DocumentReference projectRef,
+    required DocumentReference partRef,
+    required String projectName,
+    required String partNumber,
+    required String opName,
+    required String status,
+  }) async {
+    final db = FirebaseFirestore.instance;
+    final q = await db
+        .collection('production_daily')
+        .where('parteRef', isEqualTo: partRef)
+        .where('operacionNombre', isEqualTo: opName)
+        .where('auto', isEqualTo: true)
+        .limit(1)
+        .get();
+    if (q.docs.isEmpty) {
+      await db.collection('production_daily').add({
+        'auto': true,
+        'proyectoRef': projectRef,
+        'parteRef': partRef,
+        'proyecto': projectName,
+        'numeroParte': partNumber,
+        'operacion': opName,
+        'operacionNombre': opName,
+        'opSecuencia': 0,
+        'cantidad': 0,
+        'status': status,
+        'fecha': Timestamp.now(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } else {
+      await q.docs.first.reference.update({
+        'status': status,
+        'updatedAt': FieldValue.serverTimestamp(),
+        if (status == 'hecho') 'fin': FieldValue.serverTimestamp(),
+        if (status != 'hecho') 'fin': null,
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -375,35 +444,31 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                     child: ListView(
                       children: [
                         // Selector de proyecto
-                        InputDecorator(
+                        DropdownButtonFormField<String?>(
+                          isExpanded: true,
+                          value: _selectedProjectId,
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text('Nuevo proyecto'),
+                            ),
+                            ...projects.map(
+                              (p) => DropdownMenuItem<String?>(
+                                value: p['id'] as String,
+                                child: Text(p['proyecto'] as String),
+                              ),
+                            ),
+                          ],
+                          onChanged: (v) => setState(() {
+                            _selectedProjectId = v;
+                            if (v == null) {
+                              _proyectoCtrl.clear();
+                              _descProyectoCtrl.clear();
+                            }
+                          }),
                           decoration: const InputDecoration(
                             labelText: 'Proyecto',
                             border: OutlineInputBorder(),
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String?>(
-                              isExpanded: true,
-                              value: _selectedProjectId, // null = nuevo
-                              items: [
-                                const DropdownMenuItem<String?>(
-                                  value: null,
-                                  child: Text('➕ Nuevo proyecto…'),
-                                ),
-                                ...projects.map(
-                                  (p) => DropdownMenuItem<String?>(
-                                    value: p['id'] as String,
-                                    child: Text(p['proyecto'] as String),
-                                  ),
-                                ),
-                              ],
-                              onChanged: (v) => setState(() {
-                                _selectedProjectId = v;
-                                if (v == null) {
-                                  _proyectoCtrl.clear();
-                                  _descProyectoCtrl.clear();
-                                }
-                              }),
-                            ),
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -682,6 +747,28 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
                                     ),
                                   ],
                                 ),
+                                const SizedBox(height: 8),
+                                // Alternativa: links (SharePoint u otros)
+                                TextField(
+                                  controller: row.drawingLinkCtrl,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Plano (URL opcional)',
+                                    hintText:
+                                        'https://... (si no subes archivo)',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                TextField(
+                                  controller: row.solidsLinkCtrl,
+                                  decoration: const InputDecoration(
+                                    labelText:
+                                        'Sólidos (URLs separadas por coma)',
+                                    hintText: 'https://... , https://... , ...',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  maxLines: 2,
+                                ),
                                 const Divider(height: 20),
                               ],
                             ),
@@ -725,24 +812,27 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
   }
 }
 
-/// Fila de captura + archivos + Cantidad + dimensión/material
 class _PartRow {
   final TextEditingController numeroCtrl = TextEditingController();
   final TextEditingController descCtrl = TextEditingController();
   final TextEditingController cantidadCtrl = TextEditingController();
 
-  // NUEVO:
   final TextEditingController nestCtrl = TextEditingController();
-  String? materialDocId; // id del doc en `materials`
+  String? materialDocId;
 
-  PlatformFile? drawing; // jpg/pdf
-  final List<PlatformFile> solids = []; // x_t / step (múltiples)
+  final TextEditingController drawingLinkCtrl = TextEditingController();
+  final TextEditingController solidsLinkCtrl = TextEditingController();
+
+  PlatformFile? drawing;
+  final List<PlatformFile> solids = [];
 
   void dispose() {
     numeroCtrl.dispose();
     descCtrl.dispose();
     cantidadCtrl.dispose();
     nestCtrl.dispose();
+    drawingLinkCtrl.dispose();
+    solidsLinkCtrl.dispose();
   }
 }
 
@@ -761,6 +851,8 @@ class _PendingPart {
   final List<PlatformFile> solids;
   final String nestDim;
   final String? materialDocId;
+  final String? drawingLink;
+  final List<String> solidLinks;
   _PendingPart({
     required this.pn,
     required this.desc,
@@ -769,6 +861,8 @@ class _PendingPart {
     required this.solids,
     required this.nestDim,
     required this.materialDocId,
+    required this.drawingLink,
+    required this.solidLinks,
   });
 }
 

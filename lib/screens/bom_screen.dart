@@ -116,6 +116,14 @@ class _BomScreenState extends State<BomScreen> {
         .map((qs) {
           return qs.docs.map((d) {
             final m = d.data();
+            final purchaseStatusRaw = (m['purchaseStatus'] ?? '').toString();
+            final materialCompradoBool = (m['materialComprado'] ?? false) == true;
+            final purchaseStatus = () {
+              final s = purchaseStatusRaw.trim().toLowerCase();
+              if (s.isNotEmpty) return s;
+              return materialCompradoBool ? 'comprado' : 'pendiente';
+            }();
+
             return _PartDoc(
               id: d.id,
               numero: (m['numeroParte'] ?? '').toString(),
@@ -125,7 +133,7 @@ class _BomScreenState extends State<BomScreen> {
                   : int.tryParse('${m['cantidadPlan']}') ?? 0,
               nestDim: (m['nestDim'] ?? m['nesting'] ?? '')
                   .toString(), // compat
-              materialComprado: (m['materialComprado'] ?? false) == true,
+              purchaseStatus: purchaseStatus,
               materialCompradoFecha: m['materialCompradoFecha'] is Timestamp
                   ? (m['materialCompradoFecha'] as Timestamp)
                   : null,
@@ -171,6 +179,40 @@ class _BomScreenState extends State<BomScreen> {
   }
 
   // ---------- CSV / PDF ----------
+  String _purchaseLabel(String s) {
+    switch (s.trim().toLowerCase()) {
+      case 'en_bodega':
+        return 'En bodega';
+      case 'comprado':
+        return 'Comprado';
+      case 'pendiente':
+      default:
+        return 'Pendiente';
+    }
+  }
+
+  Color _purchaseBg(String s) {
+    switch (s.trim().toLowerCase()) {
+      case 'en_bodega':
+        return Colors.green.withOpacity(.12);
+      case 'comprado':
+        return Colors.orange.withOpacity(.12);
+      default:
+        return Colors.red.withOpacity(.12);
+    }
+  }
+
+  Color _purchaseFg(String s) {
+    switch (s.trim().toLowerCase()) {
+      case 'en_bodega':
+        return Colors.green.shade800;
+      case 'comprado':
+        return Colors.orange.shade800;
+      default:
+        return Colors.red.shade800;
+    }
+  }
+
   Future<void> _copyCsv(List<_BomRow> rows) async {
     final header = [
       'numeroParte',
@@ -195,7 +237,7 @@ class _BomScreenState extends State<BomScreen> {
           (r.plan - r.asignada).clamp(0, 1 << 31),
           r.materialLabel.replaceAll(',', ' '),
           r.nestDim.replaceAll(',', ' '),
-          r.materialComprado ? 'Comprado' : 'Pendiente',
+          _purchaseLabel(r.purchaseStatus),
           r.proveedorMostrar.replaceAll(',', ' '),
           r.materialCompradoFecha == null
               ? ''
@@ -277,7 +319,7 @@ class _BomScreenState extends State<BomScreen> {
               'Material',
               'Dimensión',
               'Grupo',
-              'Estatus',
+              'Estatus compra',
               'Proveedor',
               'Fecha',
             ],
@@ -288,7 +330,7 @@ class _BomScreenState extends State<BomScreen> {
                 r.materialLabel,
                 r.nestDim,
                 (r.nestGroup.trim().isEmpty ? '—' : r.nestGroup),
-                r.materialComprado ? 'Comprado' : 'Pendiente',
+                _purchaseLabel(r.purchaseStatus),
                 r.proveedorMostrar,
                 r.materialCompradoFecha == null
                     ? ''
@@ -557,9 +599,8 @@ class _BomScreenState extends State<BomScreen> {
                                         nestGroup: p.nestGroup,
                                         materialLabel: matLabel,
                                         materialColorHex: matColor,
-                                        materialComprado: p.materialComprado,
-                                        materialCompradoFecha:
-                                            p.materialCompradoFecha,
+                                        purchaseStatus: p.purchaseStatus,
+                                        materialCompradoFecha: p.materialCompradoFecha,
                                         proveedorMostrar: prov,
                                         ref: p.docRef,
                                       );
@@ -579,13 +620,15 @@ class _BomScreenState extends State<BomScreen> {
                                           .toList();
                                     }
                                     if (_onlyMaterialPending.value) {
+                                      // Solo partes con estatus de compra 'pendiente'
                                       rows.removeWhere(
-                                        (r) => r.materialComprado,
+                                        (r) => r.purchaseStatus.trim().toLowerCase() != 'pendiente',
                                       );
                                     }
                                     if (_onlyPurchasePending.value) {
+                                      // Excluir las que ya están en bodega
                                       rows.removeWhere(
-                                        (r) => r.materialComprado == true,
+                                        (r) => r.purchaseStatus.trim().toLowerCase() == 'en_bodega',
                                       );
                                     }
 
@@ -896,14 +939,11 @@ class _BomScreenState extends State<BomScreen> {
                 runSpacing: 6,
                 children: [
                   _chip(
-                    r.materialComprado ? 'Comprado' : 'Pendiente',
-                    color: (r.materialComprado ? Colors.green : Colors.red)
-                        .withOpacity(.12),
-                    textColor: r.materialComprado
-                        ? Colors.green.shade800
-                        : Colors.red.shade800,
+                    _purchaseLabel(r.purchaseStatus),
+                    color: _purchaseBg(r.purchaseStatus),
+                    textColor: _purchaseFg(r.purchaseStatus),
                   ),
-                  if (r.materialComprado && r.materialCompradoFecha != null)
+                  if (r.materialCompradoFecha != null)
                     _chip(
                       DateFormat(
                         'yyyy-MM-dd',
@@ -976,7 +1016,9 @@ class _BomScreenState extends State<BomScreen> {
       materialId = found.isValid ? found.id : null;
     }
 
-    bool comprado = r.materialComprado;
+    String status = r.purchaseStatus.trim().isEmpty
+        ? 'pendiente'
+        : r.purchaseStatus.trim().toLowerCase();
     Timestamp? fecha = r.materialCompradoFecha;
 
     // catálogo de proveedores
@@ -1052,10 +1094,12 @@ class _BomScreenState extends State<BomScreen> {
                   // Estatus de COMPRA
                   SwitchListTile.adaptive(
                     title: const Text('Material comprado'),
-                    value: comprado,
-                    onChanged: (v) => setState(() => comprado = v),
+                    value: status != 'pendiente',
+                    onChanged: (v) => setState(() {
+                      status = v ? 'comprado' : 'pendiente';
+                    }),
                   ),
-                  if (comprado) ...[
+                  if (status != 'pendiente') ...[
                     DropdownButtonFormField<String>(
                       value: supplierId,
                       isExpanded: true,
@@ -1107,8 +1151,10 @@ class _BomScreenState extends State<BomScreen> {
                       try {
                         final data = <String, dynamic>{
                           'nestDim': dimCtrl.text.trim(),
-                          'materialComprado': comprado,
-                          'materialCompradoFecha': comprado ? fecha : null,
+                          'purchaseStatus': status,
+                          // compatibilidad con booleano previo
+                          'materialComprado': status != 'pendiente',
+                          'materialCompradoFecha': status != 'pendiente' ? fecha : null,
                         };
 
                         // material
@@ -1121,18 +1167,22 @@ class _BomScreenState extends State<BomScreen> {
                               .doc(materialId);
                           final matSnap = await matRef.get();
                           data['materialRef'] = matRef;
-                          data['materialCode'] = (matSnap.data()?['code'] ?? '')
-                              .toString();
+                          final matData = matSnap.data();
+                          data['materialCode'] =
+                              ((matData == null ? '' : (matData['code'] ?? '')))
+                                  .toString();
                         }
 
                         // proveedor (sólo si comprado)
-                        if (comprado && supplierId != null) {
+                        if (status != 'pendiente' && supplierId != null) {
                           final supRef = FirebaseFirestore.instance
                               .collection('suppliers')
                               .doc(supplierId);
                           final supSnap = await supRef.get();
-                          final supName = (supSnap.data()?['name'] ?? '')
-                              .toString();
+                          final supData = supSnap.data();
+                          final supName =
+                              ((supData == null ? '' : (supData['name'] ?? '')))
+                                  .toString();
                           data['supplierRef'] = supRef;
                           data['proveedor'] = supName; // opcional, fácil export
                         } else {
@@ -1140,7 +1190,11 @@ class _BomScreenState extends State<BomScreen> {
                           data['proveedor'] = FieldValue.delete();
                         }
 
-                        await r.ref.update(data);
+                    await r.ref.update(data);
+                        try {
+                          // Sincroniza operación automática "STOCK"
+                          await _syncStockAutoOp(r, status);
+                        } catch (_) {}
                         if (mounted) Navigator.pop(ctx);
                       } catch (e) {
                         if (!mounted) return;
@@ -1214,6 +1268,109 @@ class _BomScreenState extends State<BomScreen> {
   }
 }
 
+// ---------- Auto-ops helpers ----------
+extension _RefParent on DocumentReference {
+  DocumentReference? get parentParent {
+    try {
+      // parts collection -> project doc
+      return parent.parent;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+extension _BomHelpers on _BomScreenState {
+  Future<void> _syncStockAutoOp(_BomRow r, String status) async {
+    final partRef = r.ref;
+    final projectRef = partRef.parent.parent; // /projects/{id}
+    if (projectRef == null) return;
+    final projSnap = await projectRef.get();
+    final projData = projSnap.data();
+    final projectName =
+        ((projData == null ? '' : (projData['proyecto'] ?? ''))).toString();
+
+    final s = status.trim().toLowerCase();
+    if (s == 'pendiente') {
+      // Si existe doc auto, elimínalo para no ensuciar el tablero
+      await _deleteAutoOpIfAny(partRef: partRef, opName: 'STOCK');
+      return;
+    }
+    final opStatus = s == 'en_bodega' ? 'hecho' : 'programado';
+
+    await _upsertAutoOp(
+      projectRef: projectRef,
+      partRef: partRef,
+      projectName: projectName,
+      partNumber: r.numero,
+      opName: 'STOCK',
+      status: opStatus,
+    );
+  }
+
+  Future<void> _upsertAutoOp({
+    required DocumentReference projectRef,
+    required DocumentReference partRef,
+    required String projectName,
+    required String partNumber,
+    required String opName,
+    required String status,
+  }) async {
+    final db = FirebaseFirestore.instance;
+    final q = await db
+        .collection('production_daily')
+        .where('parteRef', isEqualTo: partRef)
+        .where('operacionNombre', isEqualTo: opName)
+        .where('auto', isEqualTo: true)
+        .limit(1)
+        .get();
+
+    Timestamp nowTs = Timestamp.now();
+    if (q.docs.isEmpty) {
+      await db.collection('production_daily').add({
+        'auto': true,
+        'proyectoRef': projectRef,
+        'parteRef': partRef,
+        'proyecto': projectName,
+        'numeroParte': partNumber,
+        'operacion': opName,
+        'operacionNombre': opName,
+        'opSecuencia': 0,
+        'cantidad': 0,
+        'status': status,
+        'fecha': nowTs,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } else {
+      await q.docs.first.reference.update({
+        'status': status,
+        'updatedAt': FieldValue.serverTimestamp(),
+        if (status == 'hecho') 'fin': FieldValue.serverTimestamp(),
+        if (status != 'hecho') 'fin': null,
+        if (status != 'hecho') 'inicio': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  Future<void> _deleteAutoOpIfAny({
+    required DocumentReference partRef,
+    required String opName,
+  }) async {
+    final db = FirebaseFirestore.instance;
+    final q = await db
+        .collection('production_daily')
+        .where('parteRef', isEqualTo: partRef)
+        .where('operacionNombre', isEqualTo: opName)
+        .where('auto', isEqualTo: true)
+        .limit(1)
+        .get();
+    if (q.docs.isNotEmpty) {
+      await q.docs.first.reference.delete();
+    }
+  }
+}
+
 // ------- Models -------
 class _PartDoc {
   final String id;
@@ -1221,7 +1378,7 @@ class _PartDoc {
   final String descr;
   final int plan;
   final String nestDim;
-  final bool materialComprado;
+  final String purchaseStatus; // 'pendiente' | 'comprado' | 'en_bodega'
   final Timestamp? materialCompradoFecha;
   final String materialCode;
   final DocumentReference? materialRef;
@@ -1236,7 +1393,7 @@ class _PartDoc {
     required this.descr,
     required this.plan,
     required this.nestDim,
-    required this.materialComprado,
+    required this.purchaseStatus,
     required this.materialCompradoFecha,
     required this.materialCode,
     required this.materialRef,
@@ -1257,7 +1414,7 @@ class _BomRow {
   final String nestGroup;
   final String materialLabel;
   final String? materialColorHex;
-  final bool materialComprado;
+  final String purchaseStatus;
   final Timestamp? materialCompradoFecha;
   final String proveedorMostrar;
   final DocumentReference ref;
@@ -1272,7 +1429,7 @@ class _BomRow {
     required this.nestGroup,
     required this.materialLabel,
     required this.materialColorHex,
-    required this.materialComprado,
+    required this.purchaseStatus,
     required this.materialCompradoFecha,
     required this.proveedorMostrar,
     required this.ref,

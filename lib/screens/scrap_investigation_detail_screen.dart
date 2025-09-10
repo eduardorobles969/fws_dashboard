@@ -47,7 +47,8 @@ class _ScrapInvestigationDetailScreenState
           .collection('users')
           .doc(u.uid)
           .get();
-      final role = (doc.data()?['role'] ?? '').toString();
+      final data = doc.data();
+      final role = (data == null ? '' : (data['role'] ?? '')).toString();
       if (mounted) setState(() => _isAdmin = (role == 'administrador'));
     } catch (_) {
       // ignora: sin rol => no admin

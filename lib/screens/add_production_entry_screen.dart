@@ -95,6 +95,14 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                     : int.tryParse('${d['order']}') ?? 9999,
               ),
             )
+            .where((o) {
+              final n = o.nombre.trim().toUpperCase();
+              // Oculta operaciones no asignables manualmente
+              if (n == 'DIBUJO') return false;
+              if (n == 'STOCK' || n == 'ALMACEN' || n == 'ALMACÉN')
+                return false;
+              return true;
+            })
             .toList()
           ..sort((a, b) => a.order.compareTo(b.order));
 
@@ -214,7 +222,9 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
         .doc(_partId)
         .get();
 
-    final plan = (partSnap.data()?['cantidadPlan'] ?? 0) as int;
+    final partMap = partSnap.data();
+    final plan =
+        ((partMap == null ? 0 : (partMap['cantidadPlan'] ?? 0)) as int);
 
     // Suma producido del P/N
     final produced = await _producedForPart(

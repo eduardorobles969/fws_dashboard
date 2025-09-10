@@ -67,7 +67,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .doc(uid)
           .snapshots()
           .listen((snap) {
-            final r = (snap.data()?['role'] ?? 'operador') as String;
+            final m = snap.data();
+            final r = (m == null ? 'operador' : (m['role'] ?? 'operador'))
+                .toString();
             if (mounted) setState(() => _role = _normRole(r));
           });
     }

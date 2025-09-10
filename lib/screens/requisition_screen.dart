@@ -349,7 +349,8 @@ class _RequisitionScreenState extends State<RequisitionScreen> {
           .collection('projects')
           .doc(_projectId)
           .get();
-      _projectName = (doc.data()?['proyecto'] ?? '').toString();
+      final data = doc.data();
+      _projectName = (data == null ? '' : (data['proyecto'] ?? '')).toString();
     }
 
     final user = FirebaseAuth.instance.currentUser;

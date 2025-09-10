@@ -718,7 +718,7 @@ class _NewMovementTabState extends State<_NewMovementTab> {
       // 1) Leer stock actual (si no existe, qtyActual=0)
       final stockSnap = await tx.get(stockRef);
       final currentQty = stockSnap.exists
-          ? ((stockSnap.data()?['qty'] ?? 0) as int)
+          ? (((() { final m = stockSnap.data(); return m == null ? 0 : (m['qty'] ?? 0); })()) as int)
           : 0;
 
       int newQty = currentQty;
