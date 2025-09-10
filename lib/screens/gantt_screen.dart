@@ -1,3 +1,4 @@
+// lib/screens/gantt_screen.dart
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -21,7 +22,6 @@ class _GanttScreenState extends State<GanttScreen> {
   final _vLabels = ScrollController();
   final _vBody = ScrollController();
 
-  // Flags para evitar bucles de sincronización
   bool _syncHFromHeader = false, _syncHFromBody = false;
   bool _syncVFromLabels = false, _syncVFromBody = false;
 
@@ -29,9 +29,14 @@ class _GanttScreenState extends State<GanttScreen> {
   DateTime? _lastMinD;
   double _lastCanvasW = 0;
 
+  // Catálogo de operaciones: nombre -> order
+  late final Future<Map<String, int>> _opsOrderFuture;
+
   @override
   void initState() {
     super.initState();
+
+    _opsOrderFuture = _loadOpsOrder();
 
     // --- Horizontal: BIDIRECCIONAL ---
     _hBody.addListener(() {
@@ -79,6 +84,23 @@ class _GanttScreenState extends State<GanttScreen> {
     _vLabels.dispose();
     _vBody.dispose();
     super.dispose();
+  }
+
+  // ===== Cargar orden de operaciones (normalizado en MAYÚSCULAS) =====
+  Future<Map<String, int>> _loadOpsOrder() async {
+    final map = <String, int>{};
+    final res = await FirebaseFirestore.instance
+        .collection('operations')
+        .orderBy('order')
+        .get();
+    for (final d in res.docs) {
+      final nombre = (d.data()['nombre'] ?? '').toString().trim().toUpperCase();
+      final order = (d.data()['order'] is int)
+          ? d.data()['order'] as int
+          : int.tryParse('${d.data()['order']}') ?? 9999;
+      if (nombre.isNotEmpty) map[nombre] = order;
+    }
+    return map;
   }
 
   @override
@@ -180,326 +202,372 @@ class _GanttScreenState extends State<GanttScreen> {
         ),
       ),
 
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: q.snapshots(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
+      body: FutureBuilder<Map<String, int>>(
+        future: _opsOrderFuture,
+        builder: (ctx, opsSnap) {
+          if (opsSnap.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
           }
-
-          final docs = snap.data!.docs;
-          if (docs.isEmpty) return const Center(child: Text('Sin datos.'));
-
-          // ===== 1) Agrupar Proyecto → Parte → Operaciones
-          final grouped = <String, Map<String, List<Map<String, dynamic>>>>{};
-          DateTime? minD, maxD;
-
-          for (final d in docs) {
-            final m = d.data();
-            final proyecto = (m['proyecto'] ?? '—') as String;
-            final parte = (m['numeroParte'] ?? '—') as String;
-
-            final opName = (m['operacionNombre'] ?? m['operacion'] ?? '—')
-                .toString();
-            final sec = (m['opSecuencia'] ?? 9999) as int;
-
-            // Plan
-            final DateTime? planStart = (m['fecha'] as Timestamp?)?.toDate();
-            final DateTime? planEnd =
-                (m['fechaCompromiso'] as Timestamp?)?.toDate() ??
-                (planStart?.add(const Duration(days: 1)));
-
-            // Real
-            final DateTime? realStart = (m['inicio'] as Timestamp?)?.toDate();
-            DateTime? realEnd = (m['fin'] as Timestamp?)?.toDate();
-            if (realStart != null && realEnd == null) {
-              final now = DateTime.now();
-              realEnd = now.isBefore(realStart) ? realStart : now;
-            }
-
-            for (final dt in [planStart, planEnd, realStart, realEnd]) {
-              if (dt == null) continue;
-              minD = (minD == null || dt.isBefore(minD)) ? dt : minD;
-              maxD = (maxD == null || dt.isAfter(maxD)) ? dt : maxD;
-            }
-
-            grouped.putIfAbsent(proyecto, () => {});
-            grouped[proyecto]!.putIfAbsent(parte, () => []);
-            grouped[proyecto]![parte]!.add({
-              'op': opName,
-              'opSecuencia': sec,
-              'planStart': planStart,
-              'planEnd': planEnd,
-              'realStart': realStart,
-              'realEnd': realEnd,
-            });
+          if (opsSnap.hasError) {
+            return Center(child: Text('Error ops: ${opsSnap.error}'));
           }
+          final opsOrder = opsSnap.data ?? const <String, int>{};
 
-          // Rango visible
-          minD ??= DateTime.now();
-          maxD ??= DateTime.now().add(const Duration(days: 7));
-          minD = DateTime(minD.year, minD.month, minD.day);
-          maxD = DateTime(maxD.year, maxD.month, maxD.day);
+          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: q.snapshots(),
+            builder: (context, snap) {
+              if (snap.hasError) {
+                return Center(child: Text('Error: ${snap.error}'));
+              }
+              if (!snap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
 
-          final totalDays = max(1, maxD.difference(minD).inDays + 1);
-          final canvasWidth = totalDays * _dayW;
+              final docs = snap.data!.docs;
+              if (docs.isEmpty) {
+                return const Center(child: Text('Sin datos.'));
+              }
 
-          // Guardar para “Ir a hoy”
-          _lastMinD = minD;
-          _lastCanvasW = canvasWidth;
+              // ===== 1) Agrupar Proyecto → Parte → Operaciones
+              final grouped =
+                  <String, Map<String, List<Map<String, dynamic>>>>{};
+              DateTime? minD, maxD;
 
-          // ===== 2) Orden “escalera” (proy/parte por su primera fecha)
-          DateTime? firstOfOps(List<Map<String, dynamic>> ops) {
-            DateTime? out;
-            for (final o in ops) {
-              final p = o['planStart'] as DateTime?;
-              final r = o['realStart'] as DateTime?;
-              final c = p ?? r;
-              if (c == null) continue;
-              if (out == null || c.isBefore(out)) out = c;
-            }
-            return out;
-          }
+              for (final d in docs) {
+                final m = d.data();
+                final proyecto = (m['proyecto'] ?? '—') as String;
+                final parte = (m['numeroParte'] ?? '—') as String;
 
-          final projectEntries = grouped.entries.toList()
-            ..sort((a, b) {
-              DateTime? aMin, bMin;
-              for (final ops in a.value.values) {
-                final f = firstOfOps(ops);
-                if (f != null) {
-                  aMin = (aMin == null || f.isBefore(aMin)) ? f : aMin;
+                final opName = (m['operacionNombre'] ?? m['operacion'] ?? '—')
+                    .toString();
+                final sec = (m['opSecuencia'] ?? 9999) as int;
+
+                // Plan
+                final DateTime? planStart = (m['fecha'] as Timestamp?)
+                    ?.toDate();
+                final DateTime? planEnd =
+                    (m['fechaCompromiso'] as Timestamp?)?.toDate() ??
+                    (planStart?.add(const Duration(days: 1)));
+
+                // Real
+                final DateTime? realStart = (m['inicio'] as Timestamp?)
+                    ?.toDate();
+                DateTime? realEnd = (m['fin'] as Timestamp?)?.toDate();
+                if (realStart != null && realEnd == null) {
+                  final now = DateTime.now();
+                  realEnd = now.isBefore(realStart) ? realStart : now;
                 }
-              }
-              for (final ops in b.value.values) {
-                final f = firstOfOps(ops);
-                if (f != null) {
-                  bMin = (bMin == null || f.isBefore(bMin)) ? f : bMin;
+
+                for (final dt in [planStart, planEnd, realStart, realEnd]) {
+                  if (dt == null) continue;
+                  minD = (minD == null || dt.isBefore(minD)) ? dt : minD;
+                  maxD = (maxD == null || dt.isAfter(maxD)) ? dt : maxD;
                 }
+
+                grouped.putIfAbsent(proyecto, () => {});
+                grouped[proyecto]!.putIfAbsent(parte, () => []);
+                grouped[proyecto]![parte]!.add({
+                  'op': opName,
+                  'opSecuencia': sec,
+                  'planStart': planStart,
+                  'planEnd': planEnd,
+                  'realStart': realStart,
+                  'realEnd': realEnd,
+                });
               }
-              return (aMin ?? DateTime(2100)).compareTo(bMin ?? DateTime(2100));
-            });
 
-          final rows = <_Row>[];
-          for (final projEntry in projectEntries) {
-            final project = projEntry.key;
-            final parts = projEntry.value;
+              // Rango visible
+              minD ??= DateTime.now();
+              maxD ??= DateTime.now().add(const Duration(days: 7));
+              minD = DateTime(minD.year, minD.month, minD.day);
+              maxD = DateTime(maxD.year, maxD.month, maxD.day);
 
-            rows.add(_Row.project(project));
+              final totalDays = max(1, maxD.difference(minD).inDays + 1);
+              final canvasWidth = totalDays * _dayW;
 
-            final partEntries = parts.entries.toList()
-              ..sort((a, b) {
-                final af = firstOfOps(a.value) ?? DateTime(2100);
-                final bf = firstOfOps(b.value) ?? DateTime(2100);
-                return af.compareTo(bf);
-              });
+              // Guardar para “Ir a hoy”
+              _lastMinD = minD;
+              _lastCanvasW = canvasWidth;
 
-            for (final partEntry in partEntries) {
-              final pn = partEntry.key;
-              final ops = List<Map<String, dynamic>>.from(partEntry.value)
-                ..sort(
-                  (a, b) => (a['opSecuencia'] as int).compareTo(
-                    b['opSecuencia'] as int,
-                  ),
-                );
-
-              rows.add(_Row.part(project, pn));
-              for (final op in ops) {
-                rows.add(
-                  _Row.operation(
-                    project: project,
-                    part: pn,
-                    label: '[${op['opSecuencia']}] ${op['op']}',
-                    planStart: op['planStart'] as DateTime?,
-                    planEnd: op['planEnd'] as DateTime?,
-                    realStart: op['realStart'] as DateTime?,
-                    realEnd: op['realEnd'] as DateTime?,
-                  ),
-                );
+              // ===== 2) Orden “escalera”
+              DateTime? firstOfOps(List<Map<String, dynamic>> ops) {
+                DateTime? out;
+                for (final o in ops) {
+                  final p = o['planStart'] as DateTime?;
+                  final r = o['realStart'] as DateTime?;
+                  final c = p ?? r;
+                  if (c == null) continue;
+                  if (out == null || c.isBefore(out)) out = c;
+                }
+                return out;
               }
-            }
-          }
 
-          // ===== 3) UI
-          return Column(
-            children: [
-              // Header: título panel izquierdo + días
-              Row(
-                children: [
-                  SizedBox(
-                    width: _labelsW,
-                    child: Container(
-                      height: 40,
-                      alignment: Alignment.centerLeft,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      color: Colors.grey.shade100,
-                      child: const Text(
-                        'Proyecto / Parte / Operación',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                        overflow: TextOverflow.ellipsis,
+              final projectEntries = grouped.entries.toList()
+                ..sort((a, b) {
+                  DateTime? aMin, bMin;
+                  for (final ops in a.value.values) {
+                    final f = firstOfOps(ops);
+                    if (f != null) {
+                      aMin = (aMin == null || f.isBefore(aMin)) ? f : aMin;
+                    }
+                  }
+                  for (final ops in b.value.values) {
+                    final f = firstOfOps(ops);
+                    if (f != null) {
+                      bMin = (bMin == null || f.isBefore(bMin)) ? f : bMin;
+                    }
+                  }
+                  return (aMin ?? DateTime(2100)).compareTo(
+                    bMin ?? DateTime(2100),
+                  );
+                });
+
+              final rows = <_Row>[];
+              for (final projEntry in projectEntries) {
+                final project = projEntry.key;
+                final parts = projEntry.value;
+
+                rows.add(_Row.project(project));
+
+                final partEntries = parts.entries.toList()
+                  ..sort((a, b) {
+                    final af = firstOfOps(a.value) ?? DateTime(2100);
+                    final bf = firstOfOps(b.value) ?? DateTime(2100);
+                    return af.compareTo(bf);
+                  });
+
+                for (final partEntry in partEntries) {
+                  final pn = partEntry.key;
+
+                  // === ORDEN POR CATÁLOGO OPERATIONS ===
+                  final ops = List<Map<String, dynamic>>.from(partEntry.value)
+                    ..sort((a, b) {
+                      final an = (a['op'] ?? '')
+                          .toString()
+                          .trim()
+                          .toUpperCase();
+                      final bn = (b['op'] ?? '')
+                          .toString()
+                          .trim()
+                          .toUpperCase();
+
+                      final ao = opsOrder[an] ?? 9999;
+                      final bo = opsOrder[bn] ?? 9999;
+
+                      final byCatalog = ao.compareTo(bo);
+                      if (byCatalog != 0) return byCatalog;
+
+                      // Empate: caemos en opSecuencia y luego en alfabético
+                      final sa = (a['opSecuencia'] is int)
+                          ? a['opSecuencia'] as int
+                          : int.tryParse('${a['opSecuencia']}') ?? 9999;
+                      final sb = (b['opSecuencia'] is int)
+                          ? b['opSecuencia'] as int
+                          : int.tryParse('${b['opSecuencia']}') ?? 9999;
+
+                      final bySeq = sa.compareTo(sb);
+                      if (bySeq != 0) return bySeq;
+
+                      return an.compareTo(bn);
+                    });
+
+                  rows.add(_Row.part(project, pn));
+                  for (final op in ops) {
+                    rows.add(
+                      _Row.operation(
+                        project: project,
+                        part: pn,
+                        label: '[${op['opSecuencia']}] ${op['op']}',
+                        planStart: op['planStart'] as DateTime?,
+                        planEnd: op['planEnd'] as DateTime?,
+                        realStart: op['realStart'] as DateTime?,
+                        realEnd: op['realEnd'] as DateTime?,
                       ),
-                    ),
-                  ),
-                  Expanded(
-                    child: SizedBox(
-                      height: 40,
-                      child: Stack(
-                        children: [
-                          // El header no acepta gestos; sigue el offset del cuerpo
-                          ListView.builder(
-                            controller: _hHeader,
-                            scrollDirection: Axis.horizontal,
-                            physics:
-                                const NeverScrollableScrollPhysics(), // fijo
-                            itemCount: totalDays,
-                            itemBuilder: (_, i) {
-                              final d = minD!.add(Duration(days: i));
-                              return Container(
-                                width: _dayW,
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  border: Border(
-                                    right: BorderSide(
-                                      color: Colors.grey.shade300,
-                                      width: 1,
-                                    ),
-                                  ),
-                                ),
-                                child: Text(
-                                  '${d.month}/${d.day}',
-                                  style: const TextStyle(fontSize: 11),
-                                ),
-                              );
-                            },
+                    );
+                  }
+                }
+              }
+
+              // ===== 3) UI
+              return Column(
+                children: [
+                  // Header: título panel izquierdo + días
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: _labelsW,
+                        child: Container(
+                          height: 40,
+                          alignment: Alignment.centerLeft,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          color: Colors.grey.shade100,
+                          child: const Text(
+                            'Proyecto / Parte / Operación',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          // Línea de Hoy en HEADER: resta offset del cuerpo
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: AnimatedBuilder(
-                                animation: _hBody,
-                                builder: (_, __) {
-                                  final int idx = DateTime.now()
-                                      .difference(minD!)
-                                      .inDays;
-                                  final double left =
-                                      idx * _dayW -
-                                      (_hBody.hasClients ? _hBody.offset : 0.0);
-                                  return Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Transform.translate(
-                                      offset: Offset(left, 0),
-                                      child: Container(
-                                        width: 2,
-                                        color: Colors.deepOrange,
+                        ),
+                      ),
+                      Expanded(
+                        child: SizedBox(
+                          height: 40,
+                          child: Stack(
+                            children: [
+                              // Header sigue el offset del cuerpo
+                              ListView.builder(
+                                controller: _hHeader,
+                                scrollDirection: Axis.horizontal,
+                                physics: const NeverScrollableScrollPhysics(),
+                                itemCount: totalDays,
+                                itemBuilder: (_, i) {
+                                  final d = minD!.add(Duration(days: i));
+                                  return Container(
+                                    width: _dayW,
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        right: BorderSide(
+                                          color: Colors.grey.shade300,
+                                          width: 1,
+                                        ),
                                       ),
+                                    ),
+                                    child: Text(
+                                      '${d.month}/${d.day}',
+                                      style: const TextStyle(fontSize: 11),
                                     ),
                                   );
                                 },
                               ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const Divider(height: 1),
-
-              // Cuerpo: etiquetas + canvas
-              Expanded(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Etiquetas
-                    SizedBox(
-                      width: _labelsW,
-                      child: ListView.builder(
-                        controller: _vLabels,
-                        itemCount: rows.length,
-                        itemBuilder: (_, i) {
-                          final r = rows[i];
-                          switch (r.type) {
-                            case _RowType.project:
-                              return _labelProject(r.project!);
-                            case _RowType.part:
-                              return _labelPart(r.part!);
-                            case _RowType.operation:
-                              return _labelOp(r.label!);
-                          }
-                        },
-                      ),
-                    ),
-                    // Canvas + línea de Hoy (continua sobre TODO el timeline)
-                    Expanded(
-                      child: Scrollbar(
-                        child: SingleChildScrollView(
-                          controller: _hBody,
-                          scrollDirection: Axis.horizontal,
-                          child: SizedBox(
-                            width: canvasWidth,
-                            child: Stack(
-                              children: [
-                                ListView.builder(
-                                  controller: _vBody,
-                                  itemCount: rows.length,
-                                  itemBuilder: (_, i) {
-                                    final r = rows[i];
-                                    if (r.type != _RowType.operation) {
-                                      return _rowSeparator(r.type);
-                                    }
-                                    return _barsRow(
-                                      minStart: minD!,
-                                      totalDays: totalDays,
-                                      dayW: _dayW,
-                                      planStart: r.planStart,
-                                      planEnd: r.planEnd,
-                                      realStart: r.realStart,
-                                      realEnd: r.realEnd,
-                                    );
-                                  },
-                                ),
-                                // Línea de Hoy en CUERPO: NO restar offset (el contenido ya scrollea)
-                                Positioned.fill(
-                                  child: IgnorePointer(
-                                    child: AnimatedBuilder(
-                                      animation: _hBody,
-                                      builder: (_, __) {
-                                        final idx = DateTime.now()
-                                            .difference(minD!)
-                                            .inDays;
-                                        final left =
-                                            idx * _dayW; // <- sin offset
-                                        return Align(
-                                          alignment: Alignment.topLeft,
-                                          child: Transform.translate(
-                                            offset: Offset(left, 0),
-                                            child: Container(
-                                              width: 2,
-                                              color: Colors.deepOrange,
-                                            ),
+                              // Línea de hoy (restando offset del body)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: AnimatedBuilder(
+                                    animation: _hBody,
+                                    builder: (_, __) {
+                                      final idx = DateTime.now()
+                                          .difference(minD!)
+                                          .inDays;
+                                      final left =
+                                          idx * _dayW -
+                                          (_hBody.hasClients
+                                              ? _hBody.offset
+                                              : 0.0);
+                                      return Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Transform.translate(
+                                          offset: Offset(left, 0),
+                                          child: Container(
+                                            width: 2,
+                                            color: Colors.deepOrange,
                                           ),
-                                        );
-                                      },
-                                    ),
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
+                    ],
+                  ),
+                  const Divider(height: 1),
 
-              const Divider(height: 1),
-              _legend(),
-              const SizedBox(height: 8),
-            ],
+                  // Cuerpo: etiquetas + canvas
+                  Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Etiquetas
+                        SizedBox(
+                          width: _labelsW,
+                          child: ListView.builder(
+                            controller: _vLabels,
+                            itemCount: rows.length,
+                            itemBuilder: (_, i) {
+                              final r = rows[i];
+                              switch (r.type) {
+                                case _RowType.project:
+                                  return _labelProject(r.project!);
+                                case _RowType.part:
+                                  return _labelPart(r.part!);
+                                case _RowType.operation:
+                                  return _labelOp(r.label!);
+                              }
+                            },
+                          ),
+                        ),
+                        // Canvas + línea de Hoy continua
+                        Expanded(
+                          child: Scrollbar(
+                            child: SingleChildScrollView(
+                              controller: _hBody,
+                              scrollDirection: Axis.horizontal,
+                              child: SizedBox(
+                                width: canvasWidth,
+                                child: Stack(
+                                  children: [
+                                    ListView.builder(
+                                      controller: _vBody,
+                                      itemCount: rows.length,
+                                      itemBuilder: (_, i) {
+                                        final r = rows[i];
+                                        if (r.type != _RowType.operation) {
+                                          return _rowSeparator(r.type);
+                                        }
+                                        return _barsRow(
+                                          minStart: minD!,
+                                          totalDays: totalDays,
+                                          dayW: _dayW,
+                                          planStart: r.planStart,
+                                          planEnd: r.planEnd,
+                                          realStart: r.realStart,
+                                          realEnd: r.realEnd,
+                                        );
+                                      },
+                                    ),
+                                    // Línea de hoy en el cuerpo (sin restar offset)
+                                    Positioned.fill(
+                                      child: IgnorePointer(
+                                        child: AnimatedBuilder(
+                                          animation: _hBody,
+                                          builder: (_, __) {
+                                            final idx = DateTime.now()
+                                                .difference(minD!)
+                                                .inDays;
+                                            final left = idx * _dayW;
+                                            return Align(
+                                              alignment: Alignment.topLeft,
+                                              child: Transform.translate(
+                                                offset: Offset(left, 0),
+                                                child: Container(
+                                                  width: 2,
+                                                  color: Colors.deepOrange,
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const Divider(height: 1),
+                  _legend(),
+                  const SizedBox(height: 8),
+                ],
+              );
+            },
           );
         },
       ),

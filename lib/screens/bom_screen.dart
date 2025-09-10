@@ -42,7 +42,6 @@ class _BomScreenState extends State<BomScreen> {
           .get();
       return qs.docs.map(_matFromDoc).toList();
     } on FirebaseException catch (e) {
-      // Si pide índice, reintenta sin where y filtra en cliente
       if (e.code == 'failed-precondition') {
         final qs = await col.orderBy('sort').get();
         return qs.docs
@@ -126,7 +125,6 @@ class _BomScreenState extends State<BomScreen> {
                   : int.tryParse('${m['cantidadPlan']}') ?? 0,
               nestDim: (m['nestDim'] ?? m['nesting'] ?? '')
                   .toString(), // compat
-              // Para Compras el estatus es simplemente comprado/pendiente
               materialComprado: (m['materialComprado'] ?? false) == true,
               materialCompradoFecha: m['materialCompradoFecha'] is Timestamp
                   ? (m['materialCompradoFecha'] as Timestamp)
@@ -135,7 +133,6 @@ class _BomScreenState extends State<BomScreen> {
               materialRef: m['materialRef'] is DocumentReference
                   ? m['materialRef']
                   : null,
-              // Proveedor: preferimos supplierRef; si no, caer a texto viejo
               proveedorTexto: (m['proveedor'] ?? '').toString(),
               supplierRef: m['supplierRef'] is DocumentReference
                   ? m['supplierRef']
@@ -258,44 +255,39 @@ class _BomScreenState extends State<BomScreen> {
             ],
           ),
           pw.SizedBox(height: 12),
+
+          // ====== PDF SIN "Plan/Asign/Faltan" y CON "Grupo" ======
           pw.TableHelper.fromTextArray(
             headerStyle: h,
             cellStyle: n,
             headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300),
             columnWidths: const {
-              0: pw.FixedColumnWidth(90),
-              1: pw.FlexColumnWidth(2),
-              2: pw.FixedColumnWidth(30),
-              3: pw.FixedColumnWidth(38),
-              4: pw.FixedColumnWidth(38),
-              5: pw.FlexColumnWidth(2),
-              6: pw.FlexColumnWidth(2),
-              7: pw.FixedColumnWidth(64),
-              8: pw.FixedColumnWidth(80),
-              9: pw.FixedColumnWidth(64),
+              0: pw.FixedColumnWidth(90), // P/N
+              1: pw.FlexColumnWidth(2), // Descripción
+              2: pw.FlexColumnWidth(2), // Material
+              3: pw.FlexColumnWidth(2), // Dimensión
+              4: pw.FixedColumnWidth(70), // Grupo (nuevo)
+              5: pw.FixedColumnWidth(64), // Estatus
+              6: pw.FixedColumnWidth(80), // Proveedor
+              7: pw.FixedColumnWidth(64), // Fecha
             },
-            headers: [
+            headers: const [
               'P/N',
               'Descripción',
-              'Plan',
-              'Asign.',
-              'Faltan',
               'Material',
               'Dimensión',
+              'Grupo',
               'Estatus',
               'Proveedor',
               'Fecha',
             ],
             data: rows.map((r) {
-              final falt = (r.plan - r.asignada).clamp(0, 1 << 31);
               return [
                 r.numero,
                 r.descr,
-                r.plan.toString(),
-                r.asignada.toString(),
-                '$falt',
                 r.materialLabel,
                 r.nestDim,
+                (r.nestGroup.trim().isEmpty ? '—' : r.nestGroup),
                 r.materialComprado ? 'Comprado' : 'Pendiente',
                 r.proveedorMostrar,
                 r.materialCompradoFecha == null
@@ -544,14 +536,16 @@ class _BomScreenState extends State<BomScreen> {
 
                                       // Proveedor a mostrar
                                       String prov = p.proveedorTexto.trim();
-                                      if (p.supplierRef != null) {
-                                        final match = sups.firstWhere(
-                                          (s) =>
-                                              s.ref.path == p.supplierRef!.path,
-                                          orElse: () => _SupplierDoc.empty(),
-                                        );
-                                        if (match.isValid) prov = match.name;
-                                      }
+                                      final match = (p.supplierRef != null)
+                                          ? sups.firstWhere(
+                                              (s) =>
+                                                  s.ref.path ==
+                                                  p.supplierRef!.path,
+                                              orElse: () =>
+                                                  _SupplierDoc.empty(),
+                                            )
+                                          : _SupplierDoc.empty();
+                                      if (match.isValid) prov = match.name;
 
                                       return _BomRow(
                                         id: p.id,
@@ -988,7 +982,6 @@ class _BomScreenState extends State<BomScreen> {
     // catálogo de proveedores
     final proveedores = await _suppliersFuture;
     String? supplierId;
-    // si hay nombre mostrado, intenta empatar
     final match = proveedores.firstWhere(
       (s) => s.name.toLowerCase() == r.proveedorMostrar.toLowerCase(),
       orElse: () => _SupplierDoc.empty(),
@@ -1141,8 +1134,7 @@ class _BomScreenState extends State<BomScreen> {
                           final supName = (supSnap.data()?['name'] ?? '')
                               .toString();
                           data['supplierRef'] = supRef;
-                          data['proveedor'] =
-                              supName; // opcional, fácil de exportar
+                          data['proveedor'] = supName; // opcional, fácil export
                         } else {
                           data['supplierRef'] = FieldValue.delete();
                           data['proveedor'] = FieldValue.delete();

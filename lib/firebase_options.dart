@@ -23,15 +23,9 @@ class DefaultFirebaseOptions {
       case TargetPlatform.android:
         return android;
       case TargetPlatform.iOS:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions have not been configured for ios - '
-          'you can reconfigure this by running the FlutterFire CLI again.',
-        );
+        return ios;
       case TargetPlatform.macOS:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions have not been configured for macos - '
-          'you can reconfigure this by running the FlutterFire CLI again.',
-        );
+        return macos;
       case TargetPlatform.windows:
         return windows;
       case TargetPlatform.linux:
@@ -72,6 +66,24 @@ class DefaultFirebaseOptions {
     authDomain: 'fws-dashboard.firebaseapp.com',
     storageBucket: 'fws-dashboard.firebasestorage.app',
     measurementId: 'G-7V0174BM8X',
+  );
+
+  static const FirebaseOptions macos = FirebaseOptions(
+    apiKey: 'AIzaSyCdRoNFd7eiCN1e9aZ3CEEvNwoE-kH7ICY',
+    appId: '1:476401337046:ios:ec9da6a9e412ea762bbf77',
+    messagingSenderId: '476401337046',
+    projectId: 'fws-dashboard',
+    storageBucket: 'fws-dashboard.firebasestorage.app',
+    iosBundleId: 'com.example.fwsDashboard',
+  );
+
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: 'AIzaSyCdRoNFd7eiCN1e9aZ3CEEvNwoE-kH7ICY',
+    appId: '1:476401337046:ios:061495436f999a322bbf77',
+    messagingSenderId: '476401337046',
+    projectId: 'fws-dashboard',
+    storageBucket: 'fws-dashboard.firebasestorage.app',
+    iosBundleId: 'com.fws.fwsdashboard',
   );
 
 }
