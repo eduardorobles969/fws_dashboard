@@ -1,4 +1,4 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 class OperatorEditEntryScreen extends StatefulWidget {
@@ -113,12 +113,23 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
   // ---------- Inicio / Fin ----------
   Future<void> _markStart() async {
     setState(() => _saving = true);
-    try {
-      await _ref.update({
-        'inicio': FieldValue.serverTimestamp(),
-        'status': 'en_proceso',
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+    try {      try {
+        await _ref.update({
+          'inicio': FieldValue.serverTimestamp(),
+          'status': 'en_proceso',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } on FirebaseException catch (e) {
+        if (e.code == 'permission-denied') {
+          await _ref.update({
+            'inicio': FieldValue.serverTimestamp(),
+            'status': 'en_proceso',
+          });
+        } else {
+          throw e;
+        }
+      }
+      
       _toast('Inicio registrado');
     } catch (e) {
       _toast('Error: $e');
@@ -138,17 +149,31 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
     }
 
     setState(() => _saving = true);
-    try {
-      await _ref.update({
-        'pass': _pass,
-        'fail': _fail,
-        // scrap YA NO se iguala a fail; sólo se mueve con "Reportar scrap".
-        'failCauseId': _fail > 0 ? _failCauseId : null,
-        'failCauseName': _fail > 0 ? _failCauseName : null,
-        'fin': FieldValue.serverTimestamp(),
-        'status': 'hecho',
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+    try {      try {
+        await _ref.update({
+          'pass': _pass,
+          'fail': _fail,
+          'failCauseId': _fail > 0 ? _failCauseId : null,
+          'failCauseName': _fail > 0 ? _failCauseName : null,
+          'fin': FieldValue.serverTimestamp(),
+          'status': 'hecho',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } on FirebaseException catch (e) {
+        if (e.code == 'permission-denied') {
+          await _ref.update({
+            'pass': _pass,
+            'fail': _fail,
+            'failCauseId': _fail > 0 ? _failCauseId : null,
+            'failCauseName': _fail > 0 ? _failCauseName : null,
+            'fin': FieldValue.serverTimestamp(),
+            'status': 'hecho',
+          });
+        } else {
+          throw e;
+        }
+      }
+      
       _toast('Orden finalizada');
     } catch (e) {
       _toast('Error: $e');

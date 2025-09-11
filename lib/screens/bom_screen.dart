@@ -186,6 +186,8 @@ class _BomScreenState extends State<BomScreen> {
         return 'En bodega';
       case 'comprado':
         return 'Comprado';
+      case 'en_camino':
+        return 'En camino';
       case 'pendiente':
       default:
         return 'Pendiente';
@@ -198,6 +200,8 @@ class _BomScreenState extends State<BomScreen> {
         return Colors.green.withOpacity(.12);
       case 'comprado':
         return Colors.orange.withOpacity(.12);
+      case 'en_camino':
+        return Colors.blue.withOpacity(.12);
       default:
         return Colors.red.withOpacity(.12);
     }
@@ -209,6 +213,8 @@ class _BomScreenState extends State<BomScreen> {
         return Colors.green.shade800;
       case 'comprado':
         return Colors.orange.shade800;
+      case 'en_camino':
+        return Colors.blue.shade800;
       default:
         return Colors.red.shade800;
     }
@@ -1101,13 +1107,21 @@ class _BomScreenState extends State<BomScreen> {
                   ),
                   const SizedBox(height: 10),
 
-                  // Estatus de COMPRA
-                  SwitchListTile.adaptive(
-                    title: const Text('Material comprado'),
-                    value: status != 'pendiente',
-                    onChanged: (v) => setState(() {
-                      status = v ? 'comprado' : 'pendiente';
-                    }),
+                  // Estatus de COMPRA (4 estados)
+                  DropdownButtonFormField<String>(
+                    value: status,
+                    isExpanded: true,
+                    items: const [
+                      DropdownMenuItem(value: 'pendiente', child: Text('Pendiente')),
+                      DropdownMenuItem(value: 'comprado', child: Text('Comprado')),
+                      DropdownMenuItem(value: 'en_camino', child: Text('En camino')),
+                      DropdownMenuItem(value: 'en_bodega', child: Text('En bodega')),
+                    ],
+                    onChanged: (v) => setState(() => status = (v ?? 'pendiente')),
+                    decoration: const InputDecoration(
+                      labelText: 'Estatus de compra',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                   if (status != 'pendiente') ...[
                     DropdownButtonFormField<String>(
@@ -1134,11 +1148,15 @@ class _BomScreenState extends State<BomScreen> {
                     const SizedBox(height: 8),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        fecha == null
-                            ? 'Fecha de compra: (toca para elegir)'
-                            : 'Fecha de compra: ${DateFormat('yyyy-MM-dd').format(fecha!.toDate())}',
-                      ),
+                      title: Text(() {
+                        final lbl = status == 'en_bodega'
+                            ? 'Fecha de recepción'
+                            : (status == 'en_camino'
+                                ? 'Fecha de envío'
+                                : 'Fecha de compra');
+                        if (fecha == null) return '$lbl: (toca para elegir)';
+                        return '$lbl: ${DateFormat('yyyy-MM-dd').format(fecha!.toDate())}';
+                      }()),
                       trailing: const Icon(Icons.event),
                       onTap: () async {
                         final now = DateTime.now();
@@ -1293,6 +1311,147 @@ extension _RefParent on DocumentReference {
 }
 
 extension _BomHelpers on _BomScreenState {
+  Future<void> _promptWarehouseIn(_BomRow r) async {
+    try {
+      // Cargar bodegas
+      final qs = await FirebaseFirestore.instance.collection('bodegas').get();
+      final bodegas = qs.docs
+          .map((d) => {'id': d.id, 'nombre': (d['nombre'] ?? '').toString()})
+          .where((b) => (b['nombre'] as String).isNotEmpty)
+          .toList();
+      if (bodegas.isEmpty) return;
+
+      String? bodegaId = bodegas.first['id'] as String;
+      final qtyCtrl = TextEditingController();
+      final refCtrl = TextEditingController(text: 'Ingreso desde BOM');
+
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Registrar entrada en almacén'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                value: bodegaId,
+                isExpanded: true,
+                items: bodegas
+                    .map((b) => DropdownMenuItem<String>(
+                          value: b['id'] as String,
+                          child: Text(b['nombre'] as String),
+                        ))
+                    .toList(),
+                onChanged: (v) => bodegaId = v,
+                decoration: const InputDecoration(
+                  labelText: 'Bodega',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: qtyCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Cantidad',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: refCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Referencia (opcional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Omitir'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Registrar'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || bodegaId == null) return;
+
+      final qty = int.tryParse(qtyCtrl.text.trim()) ?? 0;
+      if (qty <= 0) return;
+
+      await _warehouseIn(
+        bodegaId: bodegaId!,
+        bodegaNombre: bodegas.firstWhere((b) => b['id'] == bodegaId)['nombre']
+            as String,
+        partRef: r.ref,
+        numeroParte: r.numero,
+        qty: qty,
+        refText: refCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Entrada registrada en almacén')),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _warehouseIn({
+    required String bodegaId,
+    required String bodegaNombre,
+    required DocumentReference partRef,
+    required String numeroParte,
+    required int qty,
+    required String refText,
+  }) async {
+    final db = FirebaseFirestore.instance;
+    final projectRef = partRef.parent.parent!;
+    final stockRef = db
+        .collection('warehouse_stock')
+        .doc('${bodegaId}_${partRef.id}');
+    final movRef = db.collection('warehouse_movements').doc();
+
+    await db.runTransaction((tx) async {
+      final stockSnap = await tx.get(stockRef);
+      int currentQty = 0;
+      if (stockSnap.exists) {
+        final m = stockSnap.data() as Map<String, dynamic>;
+        currentQty = (m['qty'] as num?)?.toInt() ??
+            int.tryParse('${m['qty'] ?? 0}') ?? 0;
+      }
+      final newQty = currentQty + qty;
+
+      if (stockSnap.exists) {
+        tx.update(stockRef, {
+          'qty': newQty,
+          'bodegaNombre': bodegaNombre,
+          'numeroParte': numeroParte,
+        });
+      } else {
+        tx.set(stockRef, {
+          'bodegaId': bodegaId,
+          'bodegaNombre': bodegaNombre,
+          'parteId': partRef.id,
+          'numeroParte': numeroParte,
+          'qty': newQty,
+        });
+      }
+
+      tx.set(movRef, {
+        'type': 'in',
+        'qty': qty,
+        'bodegaId': bodegaId,
+        'bodegaNombre': bodegaNombre,
+        'parteId': partRef.id,
+        'numeroParte': numeroParte,
+        'ref': refText,
+        'ts': FieldValue.serverTimestamp(),
+      });
+    });
+  }
   Future<void> _syncStockAutoOp(_BomRow r, String status) async {
     final partRef = r.ref;
     final projectRef = partRef.parent.parent; // /projects/{id}
@@ -1308,7 +1467,9 @@ extension _BomHelpers on _BomScreenState {
       await _deleteAutoOpIfAny(partRef: partRef, opName: 'STOCK');
       return;
     }
-    final opStatus = s == 'en_bodega' ? 'hecho' : 'programado';
+    String opStatus = 'programado';
+    if (s == 'en_camino') opStatus = 'en_proceso';
+    if (s == 'en_bodega') opStatus = 'hecho';
 
     await _upsertAutoOp(
       projectRef: projectRef,

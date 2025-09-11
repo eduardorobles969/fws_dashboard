@@ -1,4 +1,4 @@
-// lib/screens/requisitions_library_screen.dart
+﻿// lib/screens/requisitions_library_screen.dart
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -49,10 +49,21 @@ class RequisitionsLibraryScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 title: Text(m['projectName']?.toString() ?? '(sin proyecto)'),
-                subtitle: Text(
-                  'Requisitor: ${m['requisitor'] ?? '-'} • '
-                  'Fecha límite: ${deadline == null ? '-' : DateFormat('yyyy-MM-dd').format(deadline)} • '
-                  '${items.length} item(s)',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (items.isNotEmpty)
+                      Text(items[0]['desc']?.toString() ?? ''),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        _chipStatus((m['status'] ?? 'nuevo').toString()),
+                        if ((m['poNumber'] ?? '').toString().trim().isNotEmpty)
+                          _chipPlain('PO: ' + (m['poNumber'] ?? '').toString()),
+                      ],
+                    ),
+                  ],
                 ),
                 trailing: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -67,7 +78,69 @@ class RequisitionsLibraryScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Icon(Icons.picture_as_pdf_outlined),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Ver PDF',
+                          icon: Icon(Icons.picture_as_pdf_outlined),
+                          onPressed: () async {
+                            final bytes = await _buildPdfFromDoc(m);
+                            await Printing.layoutPdf(
+                              onLayout: (_) async => bytes,
+                            );
+                          },
+                        ),
+                        PopupMenuButton<String>(
+                          onSelected: (v) async {
+                            if (v == 'po') {
+                              final po = await _askText(
+                                context,
+                                title: 'Número de PO',
+                                hint: 'PO-1234',
+                                initial: (m['poNumber'] ?? '').toString(),
+                              );
+                              if (po == null) return;
+                              await d.reference.update({
+                                'poNumber': po.trim(),
+                                'updatedAt': FieldValue.serverTimestamp(),
+                              });
+                            } else {
+                              final data = {
+                                'status': v,
+                                if (v == 'recibido')
+                                  'receivedAt': FieldValue.serverTimestamp(),
+                                'updatedAt': FieldValue.serverTimestamp(),
+                              };
+                              await d.reference.update(data);
+                            }
+                          },
+                          itemBuilder: (ctx) => const [
+                            PopupMenuItem(
+                              value: 'po',
+                              child: Text('Capturar PO'),
+                            ),
+                            PopupMenuDivider(),
+                            PopupMenuItem(
+                              value: 'nuevo',
+                              child: Text('Marcar: Nuevo'),
+                            ),
+                            PopupMenuItem(
+                              value: 'comprado',
+                              child: Text('Marcar: Comprado'),
+                            ),
+                            PopupMenuItem(
+                              value: 'en_camino',
+                              child: Text('Marcar: En camino'),
+                            ),
+                            PopupMenuItem(
+                              value: 'recibido',
+                              child: Text('Marcar: Recibido'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ],
                 ),
                 onTap: () async {
@@ -78,6 +151,68 @@ class RequisitionsLibraryScreen extends StatelessWidget {
             },
           );
         },
+      ),
+    );
+  }
+
+  Widget _chipPlain(String text) =>
+      Chip(label: Text(text), visualDensity: VisualDensity.compact);
+
+  Widget _chipStatus(String status) {
+    final s = status.toLowerCase();
+    Color bg = Colors.grey.shade200, fg = Colors.black87;
+    String label = 'Nuevo';
+    if (s == 'comprado') {
+      bg = Colors.orange.withOpacity(.12);
+      fg = Colors.orange.shade800;
+      label = 'Comprado';
+    } else if (s == 'en_camino') {
+      bg = Colors.blue.withOpacity(.12);
+      fg = Colors.blue.shade800;
+      label = 'En camino';
+    } else if (s == 'recibido') {
+      bg = Colors.green.withOpacity(.12);
+      fg = Colors.green.shade800;
+      label = 'Recibido';
+    } else if (s == 'nuevo' || s == 'borrador') {
+      label = 'Nuevo';
+    }
+    return Chip(
+      label: Text(label),
+      backgroundColor: bg,
+      labelStyle: TextStyle(color: fg, fontWeight: FontWeight.w600),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  Future<String?> _askText(
+    BuildContext context, {
+    required String title,
+    String? hint,
+    String? initial,
+  }) async {
+    final ctrl = TextEditingController(text: initial ?? '');
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: ctrl,
+          decoration: InputDecoration(
+            hintText: hint ?? '',
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('Guardar'),
+          ),
+        ],
       ),
     );
   }
