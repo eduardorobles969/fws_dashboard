@@ -50,7 +50,7 @@ class _WarehouseScreenState extends State<WarehouseScreen>
   @override
   void initState() {
     super.initState();
-    _tab = TabController(length: 3, vsync: this);
+    _tab = TabController(length: 4, vsync: this);
     _bodegasFuture = _loadBodegas();
     _partesFuture = _loadAllParts();
   }
@@ -102,6 +102,7 @@ class _WarehouseScreenState extends State<WarehouseScreen>
         bottom: TabBar(
           controller: _tab,
           tabs: const [
+            Tab(icon: Icon(Icons.pending_actions_outlined), text: 'Pendientes'),
             Tab(icon: Icon(Icons.inventory_2_outlined), text: 'Stock'),
             Tab(icon: Icon(Icons.swap_vert), text: 'Movimientos'),
             Tab(icon: Icon(Icons.add_circle_outline), text: 'Nuevo'),
@@ -123,6 +124,9 @@ class _WarehouseScreenState extends State<WarehouseScreen>
           return TabBarView(
             controller: _tab,
             children: [
+              _PendingTab(
+                bodegas: bodegas,
+              ),
               _StockTab(
                 bodegas: bodegas,
                 searchText: _stockSearch,
@@ -156,6 +160,170 @@ class _WarehouseScreenState extends State<WarehouseScreen>
           );
         },
       ),
+    );
+  }
+}
+
+/// ===============================================================
+/// TAB 0: PENDIENTES POR INGRESAR
+/// Muestra partes de proyectos marcadas como "en_bodega" en el BOM que
+/// aún no se han asignado a una bodega física.
+/// ===============================================================
+class _PendingTab extends StatefulWidget {
+  final List<_Bodega> bodegas;
+  const _PendingTab({required this.bodegas});
+
+  @override
+  State<_PendingTab> createState() => _PendingTabState();
+}
+
+class _PendingTabState extends State<_PendingTab> {
+  final Map<String, String> _projCache = {};
+
+  Future<String> _projectName(String id) async {
+    if (_projCache.containsKey(id)) return _projCache[id]!;
+    final snap =
+        await FirebaseFirestore.instance.collection('projects').doc(id).get();
+    final name = (snap.data()?['proyecto'] ?? '').toString();
+    _projCache[id] = name;
+    return name;
+  }
+
+  Future<void> _assign(DocumentSnapshot<Map<String, dynamic>> doc) async {
+    _Bodega? bodega;
+    final qtyCtrl = TextEditingController(
+      text: '${doc.data()?['cantidadPlan'] ?? 1}',
+    );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Asignar a bodega'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<_Bodega>(
+                value: bodega,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Bodega',
+                  border: OutlineInputBorder(),
+                ),
+                items: widget.bodegas
+                    .map(
+                      (b) => DropdownMenuItem(value: b, child: Text(b.nombre)),
+                    )
+                    .toList(),
+                onChanged: (v) => bodega = v,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: qtyCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Cantidad',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Guardar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (ok != true || bodega == null) return;
+    final qty = int.tryParse(qtyCtrl.text.trim()) ?? 0;
+    final data = doc.data()!;
+    final proyectoId = doc.reference.parent.parent!.id;
+    final proyectoNombre = await _projectName(proyectoId);
+    final parte = _ParteRef(
+      parteId: doc.id,
+      numeroParte: (data['numeroParte'] ?? '').toString(),
+      descripcionParte: (data['descripcionParte'] ?? '').toString(),
+      proyectoId: proyectoId,
+      proyectoNombre: proyectoNombre,
+    );
+
+    await _registerMovementAndUpdateStock(
+      type: 'in',
+      qty: qty,
+      bodega: bodega!,
+      parte: parte,
+      refText: 'Ingreso desde BOM',
+    );
+
+    await doc.reference.update({
+      'bodegaId': bodega!.id,
+      'bodegaNombre': bodega!.nombre,
+    });
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Material asignado a bodega')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = FirebaseFirestore.instance
+        .collectionGroup('parts')
+        .where('purchaseStatus', isEqualTo: 'en_bodega')
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Center(child: Text('Error: ${snap.error}'));
+        }
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final docs = snap.data!.docs.where((d) {
+          final m = d.data();
+          final bodegaId = (m['bodegaId'] ?? '').toString();
+          return bodegaId.isEmpty;
+        }).toList();
+
+        if (docs.isEmpty) {
+          return const Center(child: Text('Sin materiales pendientes'));
+        }
+
+        return ListView.separated(
+          itemCount: docs.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (_, i) {
+            final doc = docs[i];
+            final data = doc.data();
+            final numero = (data['numeroParte'] ?? '').toString();
+            final descr = (data['descripcionParte'] ?? '').toString();
+            final proyectoId = doc.reference.parent.parent!.id;
+            return FutureBuilder<String>(
+              future: _projectName(proyectoId),
+              builder: (context, snapProj) {
+                final projName = snapProj.data ?? '';
+                return ListTile(
+                  title: Text('$projName • $numero'),
+                  subtitle: Text(descr),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _assign(doc),
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -700,71 +868,6 @@ class _NewMovementTabState extends State<_NewMovementTab> {
     );
   }
 
-  /// Crea el movimiento y actualiza stock con TRANSACCIÓN
-  Future<void> _registerMovementAndUpdateStock({
-    required String type, // in/out/adjust
-    required int qty,
-    required _Bodega bodega,
-    required _ParteRef parte,
-    required String refText,
-  }) async {
-    final fs = FirebaseFirestore.instance;
-
-    final movRef = fs.collection('warehouse_movements').doc();
-    final stockId = '${bodega.id}_${parte.parteId}';
-    final stockRef = fs.collection('warehouse_stock').doc(stockId);
-
-    await fs.runTransaction((tx) async {
-      // 1) Leer stock actual (si no existe, qtyActual=0)
-      final stockSnap = await tx.get(stockRef);
-      final currentQty = stockSnap.exists
-          ? (((() { final m = stockSnap.data(); return m == null ? 0 : (m['qty'] ?? 0); })()) as int)
-          : 0;
-
-      int newQty = currentQty;
-      if (type == 'in') {
-        newQty = currentQty + qty;
-      } else if (type == 'out') {
-        if (currentQty - qty < 0) {
-          throw Exception(
-            'Stock insuficiente ($currentQty) para salida de $qty',
-          );
-        }
-        newQty = currentQty - qty;
-      } else if (type == 'adjust') {
-        newQty = qty; // qty es el valor FINAL
-      }
-
-      // 2) Upsert del stock
-      if (stockSnap.exists) {
-        tx.update(stockRef, {
-          'qty': newQty,
-          'bodegaNombre': bodega.nombre,
-          'numeroParte': parte.numeroParte,
-        });
-      } else {
-        tx.set(stockRef, {
-          'bodegaId': bodega.id,
-          'bodegaNombre': bodega.nombre,
-          'parteId': parte.parteId,
-          'numeroParte': parte.numeroParte,
-          'qty': newQty,
-        });
-      }
-
-      // 3) Registrar el movimiento
-      tx.set(movRef, {
-        'type': type,
-        'qty': qty,
-        'bodegaId': bodega.id,
-        'bodegaNombre': bodega.nombre,
-        'parteId': parte.parteId,
-        'numeroParte': parte.numeroParte,
-        'ref': refText,
-        'ts': FieldValue.serverTimestamp(),
-      });
-    });
-  }
 }
 
 /// ===================== Picker de Parte con filtro local =====================
@@ -853,5 +956,74 @@ class _ParteRef {
     required this.descripcionParte,
     required this.proyectoId,
     required this.proyectoNombre,
+  });
+}
+
+/// Crea el movimiento y actualiza stock con TRANSACCIÓN
+Future<void> _registerMovementAndUpdateStock({
+  required String type, // in/out/adjust
+  required int qty,
+  required _Bodega bodega,
+  required _ParteRef parte,
+  required String refText,
+}) async {
+  final fs = FirebaseFirestore.instance;
+
+  final movRef = fs.collection('warehouse_movements').doc();
+  final stockId = '${bodega.id}_${parte.parteId}';
+  final stockRef = fs.collection('warehouse_stock').doc(stockId);
+
+  await fs.runTransaction((tx) async {
+    // 1) Leer stock actual (si no existe, qtyActual=0)
+    final stockSnap = await tx.get(stockRef);
+    final currentQty = stockSnap.exists
+        ? (((() {
+              final m = stockSnap.data();
+              return m == null ? 0 : (m['qty'] ?? 0);
+            })()) as int)
+        : 0;
+
+    int newQty = currentQty;
+    if (type == 'in') {
+      newQty = currentQty + qty;
+    } else if (type == 'out') {
+      if (currentQty - qty < 0) {
+        throw Exception(
+          'Stock insuficiente ($currentQty) para salida de $qty',
+        );
+      }
+      newQty = currentQty - qty;
+    } else if (type == 'adjust') {
+      newQty = qty; // qty es el valor FINAL
+    }
+
+    // 2) Upsert del stock
+    if (stockSnap.exists) {
+      tx.update(stockRef, {
+        'qty': newQty,
+        'bodegaNombre': bodega.nombre,
+        'numeroParte': parte.numeroParte,
+      });
+    } else {
+      tx.set(stockRef, {
+        'bodegaId': bodega.id,
+        'bodegaNombre': bodega.nombre,
+        'parteId': parte.parteId,
+        'numeroParte': parte.numeroParte,
+        'qty': newQty,
+      });
+    }
+
+    // 3) Registrar el movimiento
+    tx.set(movRef, {
+      'type': type,
+      'qty': qty,
+      'bodegaId': bodega.id,
+      'bodegaNombre': bodega.nombre,
+      'parteId': parte.parteId,
+      'numeroParte': parte.numeroParte,
+      'ref': refText,
+      'ts': FieldValue.serverTimestamp(),
+    });
   });
 }

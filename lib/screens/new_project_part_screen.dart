@@ -307,11 +307,12 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         final hasDrawingLink =
             (p.drawingLink != null && p.drawingLink!.isNotEmpty);
         final hasSolidLinks = p.solidLinks.isNotEmpty;
-
-        if (drawingUrl != null ||
+        final hasAttachment = drawingUrl != null ||
             solidUrls.isNotEmpty ||
             hasDrawingLink ||
-            hasSolidLinks) {
+            hasSolidLinks;
+
+        if (hasAttachment) {
           await pRef.update({
             if (drawingUrl != null) 'drawingUrl': drawingUrl,
             if (drawingUrl != null) 'drawingName': drawingName,
@@ -320,12 +321,7 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
             if (hasDrawingLink) 'drawingLink': p.drawingLink,
             if (hasSolidLinks) 'solidLinkList': p.solidLinks,
           });
-        }
 
-        if (drawingUrl != null ||
-            solidUrls.isNotEmpty ||
-            hasDrawingLink ||
-            hasSolidLinks) {
           try {
             String projectName;
             if (_selectedProjectId == null) {
@@ -343,7 +339,10 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
               opName: 'DIBUJO',
               status: 'hecho',
             );
-          } catch (_) {}
+          } catch (e) {
+            // Si falla el registro automático, no cancelamos el flujo
+            debugPrint('Auto-op DIBUJO error: $e');
+          }
         }
         ok++;
       }
