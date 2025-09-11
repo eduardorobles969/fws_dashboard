@@ -1,7 +1,7 @@
-// lib/screens/production_chart_screen.dart
-import 'package:flutter/material.dart';
+// lib/screens/production_chart_screen.dart (rebuild with bar tap details)
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 class ProductionChartScreen extends StatefulWidget {
@@ -12,9 +12,9 @@ class ProductionChartScreen extends StatefulWidget {
 }
 
 class _ProductionChartScreenState extends State<ProductionChartScreen> {
-  // Vista y filtros
+  // Filtros
   String _modoVista = 'semanal'; // 'semanal' | 'mensual'
-  String? _projectName; // filtra por nombre del proyecto (campo 'proyecto')
+  String? _projectName; // nombre del proyecto (campo 'proyecto')
   String _chartStatus = 'todos'; // 'todos'|'pendiente'|'en proceso'|'hecho'
   DateTimeRange? _chartRange;
   String _metric = 'cantidad'; // 'cantidad'|'pass'|'fail'|'scrap'|'yield'
@@ -33,15 +33,12 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
     Color(0xFFFF5252), // redAccent
   ];
   final Map<String, Color> _projectColors = {};
-  Color _getColorForProject(String p) {
-    return _projectColors.putIfAbsent(
-      p,
-      () => _palette[_projectColors.length % _palette.length],
-    );
-  }
+  Color _getColorForProject(String p) => _projectColors.putIfAbsent(
+    p,
+    () => _palette[_projectColors.length % _palette.length],
+  );
 
-  // ---- Helpers de tiempo
-  // Semana ISO (1..53)
+  // Helpers
   int _isoWeekNumber(DateTime dt) {
     final d = DateTime(dt.year, dt.month, dt.day);
     final thursday = d.add(Duration(days: 3 - ((d.weekday + 6) % 7)));
@@ -49,7 +46,6 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
     return 1 + ((thursday.difference(firstThursday).inDays) / 7).floor();
   }
 
-  // ---- Futuro para lista de proyectos activos (por nombre)
   Future<List<String>> _loadProjectNames() async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
@@ -62,7 +58,6 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
       if (name.isNotEmpty) out.add(name);
     }
     if (out.isEmpty) {
-      // Fallback: lee de production_daily
       final qs2 = await FirebaseFirestore.instance
           .collection('production_daily')
           .limit(200)
@@ -76,14 +71,188 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
     return out;
   }
 
-  // ---- Stream base
   Stream<QuerySnapshot<Map<String, dynamic>>> _baseStream() {
-    // No filtramos por proyecto aquí; filtramos en cliente por nombre 'proyecto'.
     return FirebaseFirestore.instance
         .collection('production_daily')
         .orderBy('fecha', descending: false)
         .snapshots();
   }
+
+  // ---------- Detalle por barra ----------
+  Future<void> _showBarDetails(_Point p) async {
+    final periodField = _modoVista == 'semanal' ? 'anioSemana' : 'anioMes';
+    final periodValue = int.tryParse(p.periodoKey) ?? 0;
+    if (periodValue == 0) return;
+
+    try {
+      final qs = await FirebaseFirestore.instance
+          .collection('production_daily')
+          .where(periodField, isEqualTo: periodValue)
+          .get();
+
+      final Map<String, _DetailRow> acc = {};
+      for (final d in qs.docs) {
+        final m = d.data();
+        if ((m['proyecto'] ?? '').toString().trim() != p.proyecto) continue;
+
+        final status = (m['status'] ?? '').toString().toLowerCase();
+        if (_chartStatus != 'todos' && status != _chartStatus) continue;
+
+        final pn = (m['numeroParte'] ?? '').toString().trim();
+        final op = (m['operacionNombre'] ?? m['operacion'] ?? '')
+            .toString()
+            .trim();
+        final maquina = (m['maquinaNombre'] ?? '').toString().trim();
+
+        final cantidad =
+            (m['cantidad'] as num?)?.toInt() ??
+            int.tryParse('${m['cantidad'] ?? ''}') ??
+            0;
+        final pass =
+            (m['pass'] as num?)?.toInt() ??
+            int.tryParse('${m['pass'] ?? ''}') ??
+            0;
+        final fail =
+            (m['fail'] as num?)?.toInt() ??
+            int.tryParse('${m['fail'] ?? ''}') ??
+            0;
+        final scrap =
+            (m['scrap'] as num?)?.toInt() ??
+            int.tryParse('${m['scrap'] ?? ''}') ??
+            0;
+
+        // Filtrar por métrica si aplica
+        if (_metric == 'scrap' && scrap <= 0) continue;
+        if (_metric == 'fail' && fail <= 0) continue;
+        if (_metric == 'pass' && pass <= 0) continue;
+        if (_metric == 'cantidad' && cantidad <= 0) continue;
+
+        final key = '$pn|$op';
+        final prev = acc[key];
+        if (prev == null) {
+          acc[key] = _DetailRow(
+            pn: pn.isEmpty ? '—' : pn,
+            operacion: op.isEmpty ? '—' : op,
+            maquina: maquina,
+            cantidad: cantidad,
+            pass: pass,
+            fail: fail,
+            scrap: scrap,
+          );
+        } else {
+          prev.cantidad += cantidad;
+          prev.pass += pass;
+          prev.fail += fail;
+          prev.scrap += scrap;
+          if (prev.maquina.isEmpty && maquina.isNotEmpty)
+            prev.maquina = maquina;
+        }
+      }
+
+      var rows = acc.values.toList();
+      num val(_DetailRow r) {
+        switch (_metric) {
+          case 'pass':
+            return r.pass;
+          case 'fail':
+            return r.fail;
+          case 'scrap':
+            return r.scrap;
+          case 'yield':
+            final t = r.pass + r.fail + r.scrap;
+            return t == 0 ? 0 : (r.pass / t);
+          case 'cantidad':
+          default:
+            return r.cantidad;
+        }
+      }
+
+      rows.sort((a, b) => val(b).compareTo(val(a)));
+
+      if (!mounted) return;
+      await showModalBottomSheet(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (_) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${_modoVista == 'semanal' ? 'Semana' : 'Mes'} ${p.periodoLabel} · ${p.proyecto}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    _pill('Métrica: ${_metric.toUpperCase()}'),
+                    if (_chartStatus != 'todos') ...[
+                      const SizedBox(width: 8),
+                      _pill('Status: ${_chartStatus}'),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (rows.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('Sin resultados con los filtros actuales.'),
+                  )
+                else
+                  Flexible(
+                    child: Card(
+                      elevation: 1,
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: rows.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (_, i) {
+                          final r = rows[i];
+                          final subt = [
+                            if (r.operacion.isNotEmpty)
+                              'Operación: ${r.operacion}',
+                            if (r.maquina.isNotEmpty) 'Máquina: ${r.maquina}',
+                          ].join('  ·  ');
+                          final metrics = _metric == 'yield'
+                              ? 'pass:${r.pass} fail:${r.fail} scrap:${r.scrap}'
+                              : 'cant:${r.cantidad} pass:${r.pass} fail:${r.fail} scrap:${r.scrap}';
+                          return ListTile(
+                            dense: true,
+                            title: Text(r.pn),
+                            subtitle: Text(subt),
+                            trailing: Text(metrics),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('No se pudo cargar detalle: $e')));
+    }
+  }
+
+  Widget _pill(String t) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Text(t, style: const TextStyle(fontSize: 12)),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -91,7 +260,6 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
       future: _loadProjectNames(),
       builder: (context, projectsSnap) {
         final proyectos = projectsSnap.data ?? const <String>[];
-
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: _baseStream(),
           builder: (context, snapshot) {
@@ -102,7 +270,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
               return const Center(child: CircularProgressIndicator());
             }
 
-            // Filtros en cliente (status + rango + proyecto)
+            // Filtros en cliente
             final docs = snapshot.data!.docs.where((doc) {
               final m = doc.data();
 
@@ -126,65 +294,42 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                 DateTime? dt;
                 final v = m['fecha'];
                 if (v is Timestamp) dt = v.toDate();
-                dt ??= DateTime.tryParse(v?.toString() ?? '');
                 if (dt == null) return false;
-                if (dt.isBefore(_chartRange!.start) ||
-                    dt.isAfter(_chartRange!.end)) {
+                final d = DateTime(dt.year, dt.month, dt.day);
+                if (d.isBefore(_chartRange!.start) ||
+                    d.isAfter(_chartRange!.end)) {
                   return false;
                 }
               }
-
               return true;
             }).toList();
 
-            // ---- Agrupación por periodo + proyecto
+            // Agrupar por periodo(proyecto)
             final Map<String, _Point> grouped = {};
-
-            for (final doc in docs) {
-              final d = doc.data();
-
-              // Fecha / semana / mes / año robustos
-              DateTime? date;
-              final v = d['fecha'];
-              if (v is Timestamp) {
-                date = v.toDate();
-              } else {
-                date = DateTime.tryParse(v?.toString() ?? '');
-              }
-
-              final anio = (d['anio'] is int)
-                  ? d['anio'] as int
-                  : (date?.year ?? 0);
-              final semana = (d['semana'] is int)
-                  ? d['semana'] as int
-                  : (date != null ? _isoWeekNumber(date) : 0);
-              final mes = (d['mes'] is int)
-                  ? d['mes'] as int
-                  : (date?.month ?? 0);
-
-              final anioSemana = (anio != 0 && semana != 0)
-                  ? anio * 100 + semana
-                  : 0;
-              final anioMes = (anio != 0 && mes != 0) ? anio * 100 + mes : 0;
+            for (final e in docs) {
+              final d = e.data();
+              final ts = d['fecha'] as Timestamp?;
+              final dt = ts?.toDate();
+              if (dt == null) continue;
+              final anio = dt.year;
+              final mes = dt.month;
+              final semana = _isoWeekNumber(dt);
+              final anioSemana = anio * 100 + semana;
+              final anioMes = anio * 100 + mes;
 
               final proyecto = (d['proyecto'] ?? 'Sin proyecto').toString();
-
-              // valores
               final cantidad =
                   int.tryParse(d['cantidad']?.toString() ?? '') ?? 0;
               final pass = int.tryParse(d['pass']?.toString() ?? '') ?? 0;
               final fail = int.tryParse(d['fail']?.toString() ?? '') ?? 0;
               final scrap = int.tryParse(d['scrap']?.toString() ?? '') ?? 0;
 
-              late final String key; // clave de agrupación
-              late final int etiqueta; // número semana/mes
-
+              late final String key;
+              late final int etiqueta;
               if (_modoVista == 'semanal') {
-                if (anioSemana == 0) continue;
                 key = '$anioSemana|$proyecto';
                 etiqueta = semana;
               } else {
-                if (anioMes == 0) continue;
                 key = '$anioMes|$proyecto';
                 etiqueta = mes;
               }
@@ -202,7 +347,6 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
               grouped[key] = acc;
             }
 
-            // Lista ordenada por periodoKey y luego proyecto
             final data = grouped.values.toList()
               ..sort((a, b) {
                 final c = a.periodoKey.compareTo(b.periodoKey);
@@ -210,7 +354,6 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                 return a.proyecto.compareTo(b.proyecto);
               });
 
-            // Escala Y según métrica actual
             double valueOf(_Point p) {
               switch (_metric) {
                 case 'pass':
@@ -221,7 +364,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                   return p.scrap.toDouble();
                 case 'yield':
                   final t = p.pass + p.fail + p.scrap;
-                  return t == 0 ? 0 : (p.pass / t) * 100.0; // porcentaje
+                  return t == 0 ? 0 : (p.pass / t) * 100.0;
                 case 'cantidad':
                 default:
                   return p.cantidad.toDouble();
@@ -234,12 +377,10 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                 : 10.0;
             final double interval = (maxY / 5).ceilToDouble().clamp(1.0, 1e9);
 
-            // Eje X: labels compactos
             String xLabelOf(_Point p) => _modoVista == 'semanal'
                 ? 'S${p.periodoLabel}'
                 : 'M${p.periodoLabel}';
 
-            // Leyenda (proyectos únicos en los datos)
             final legendProjects = <String>{
               for (final p in data) p.proyecto,
             }.toList()..sort();
@@ -248,7 +389,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               child: Column(
                 children: [
-                  // ===== Filtros =====
+                  // Filtros
                   Row(
                     children: [
                       Expanded(
@@ -318,7 +459,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                           label: Text(
                             _chartRange == null
                                 ? 'Rango de fechas'
-                                : '${DateFormat('yyyy-MM-dd').format(_chartRange!.start)} → ${DateFormat('yyyy-MM-dd').format(_chartRange!.end)}',
+                                : '${DateFormat('yyyy-MM-dd').format(_chartRange!.start)} – ${DateFormat('yyyy-MM-dd').format(_chartRange!.end)}',
                             overflow: TextOverflow.ellipsis,
                           ),
                           onPressed: () async {
@@ -334,9 +475,8 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                                     end: now,
                                   ),
                             );
-                            if (picked != null) {
+                            if (picked != null)
                               setState(() => _chartRange = picked);
-                            }
                           },
                         ),
                       ),
@@ -355,9 +495,8 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                       ),
                     ],
                   ),
-
-                  // ===== Selector de Métrica (ChoiceChip horizontal scrollable) =====
                   const SizedBox(height: 8),
+                  // Métrica
                   Align(
                     alignment: Alignment.centerLeft,
                     child: SingleChildScrollView(
@@ -365,38 +504,15 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                       child: Row(
                         children: [
                           const SizedBox(width: 2),
-                          ChoiceChip(
-                            label: const Text('Cantidad'),
-                            selected: _metric == 'cantidad',
-                            onSelected: (_) =>
-                                setState(() => _metric = 'cantidad'),
-                          ),
+                          _metricChip('Cantidad'),
                           const SizedBox(width: 8),
-                          ChoiceChip(
-                            label: const Text('Pass'),
-                            selected: _metric == 'pass',
-                            onSelected: (_) => setState(() => _metric = 'pass'),
-                          ),
+                          _metricChip('Pass', keyVal: 'pass'),
                           const SizedBox(width: 8),
-                          ChoiceChip(
-                            label: const Text('Fail'),
-                            selected: _metric == 'fail',
-                            onSelected: (_) => setState(() => _metric = 'fail'),
-                          ),
+                          _metricChip('Fail', keyVal: 'fail'),
                           const SizedBox(width: 8),
-                          ChoiceChip(
-                            label: const Text('Scrap'),
-                            selected: _metric == 'scrap',
-                            onSelected: (_) =>
-                                setState(() => _metric = 'scrap'),
-                          ),
+                          _metricChip('Scrap', keyVal: 'scrap'),
                           const SizedBox(width: 8),
-                          ChoiceChip(
-                            label: const Text('Yield %'),
-                            selected: _metric == 'yield',
-                            onSelected: (_) =>
-                                setState(() => _metric = 'yield'),
-                          ),
+                          _metricChip('Yield %', keyVal: 'yield'),
                           const SizedBox(width: 2),
                         ],
                       ),
@@ -404,37 +520,26 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                   ),
                   const SizedBox(height: 8),
 
-                  // Leyenda de proyectos
+                  // Leyenda
                   if (legendProjects.isNotEmpty)
-                    SizedBox(
-                      height: 32,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemBuilder: (_, i) {
-                          final p = legendProjects[i];
-                          return Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 14,
-                                height: 14,
-                                decoration: BoxDecoration(
-                                  color: _getColorForProject(p),
-                                  borderRadius: BorderRadius.circular(3),
-                                ),
+                    Container(
+                      alignment: Alignment.centerLeft,
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: 10,
+                        runSpacing: 6,
+                        children: legendProjects
+                            .map(
+                              (p) => _legendItem(
+                                color: _getColorForProject(p),
+                                text: p,
                               ),
-                              const SizedBox(width: 6),
-                              Text(p, style: const TextStyle(fontSize: 12)),
-                            ],
-                          );
-                        },
-                        separatorBuilder: (_, __) => const SizedBox(width: 12),
-                        itemCount: legendProjects.length,
+                            )
+                            .toList(),
                       ),
                     ),
-                  const SizedBox(height: 8),
 
-                  // ===== Chart =====
+                  // Chart
                   if (data.isEmpty)
                     const Expanded(
                       child: Center(
@@ -448,6 +553,15 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                           maxY: maxY,
                           barTouchData: BarTouchData(
                             enabled: true,
+                            handleBuiltInTouches: true,
+                            touchCallback: (event, response) {
+                              if (!event.isInterestedForInteractions) return;
+                              final spot = response?.spot;
+                              if (spot == null) return;
+                              final i = spot.touchedBarGroupIndex;
+                              if (i >= 0 && i < data.length)
+                                _showBarDetails(data[i]);
+                            },
                             touchTooltipData: BarTouchTooltipData(
                               tooltipPadding: const EdgeInsets.all(8),
                               tooltipMargin: 12,
@@ -462,7 +576,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                                     ? '${val.toStringAsFixed(1)} %'
                                     : val.toStringAsFixed(0);
                                 return BarTooltipItem(
-                                  '$periodo • ${p.proyecto}\n$metricLabel',
+                                  '$periodo · ${p.proyecto}\n$metricLabel',
                                   const TextStyle(
                                     color: Colors.white,
                                     fontSize: 12,
@@ -484,7 +598,7 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
                                   width: 18,
                                   borderRadius: BorderRadius.circular(6),
                                   backDrawRodData: BackgroundBarChartRodData(
-                                    show: _metric != 'yield', // yield es %
+                                    show: _metric != 'yield',
                                     toY: 0,
                                     color: Colors.grey.shade200,
                                   ),
@@ -572,13 +686,35 @@ class _ProductionChartScreenState extends State<ProductionChartScreen> {
       },
     );
   }
+
+  Widget _metricChip(String label, {String? keyVal}) => ChoiceChip(
+    label: Text(label),
+    selected: _metric == (keyVal ?? 'cantidad'),
+    onSelected: (_) => setState(() => _metric = keyVal ?? 'cantidad'),
+  );
+
+  Widget _legendItem({required Color color, required String text}) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+      const SizedBox(width: 6),
+      Text(text, style: const TextStyle(fontSize: 12)),
+    ],
+  );
 }
 
-/// Punto agregado por periodo + proyecto
+// Modelos locales
 class _Point {
   final String
-  periodoKey; // "202535" (anio*100+semana) o "202512" (anio*100+mes)
-  final int periodoLabel; // número de semana o mes (1..53 / 1..12)
+  periodoKey; // '202536' (anio*100+semana) o '202512' (anio*100+mes)
+  final int periodoLabel; // número semana/mes
   final String proyecto;
   final int cantidad;
   final int pass;
@@ -589,6 +725,26 @@ class _Point {
     required this.periodoKey,
     required this.periodoLabel,
     required this.proyecto,
+    required this.cantidad,
+    required this.pass,
+    required this.fail,
+    required this.scrap,
+  });
+}
+
+class _DetailRow {
+  final String pn;
+  final String operacion;
+  String maquina;
+  int cantidad;
+  int pass;
+  int fail;
+  int scrap;
+
+  _DetailRow({
+    required this.pn,
+    required this.operacion,
+    required this.maquina,
     required this.cantidad,
     required this.pass,
     required this.fail,

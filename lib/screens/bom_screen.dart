@@ -117,7 +117,8 @@ class _BomScreenState extends State<BomScreen> {
           return qs.docs.map((d) {
             final m = d.data();
             final purchaseStatusRaw = (m['purchaseStatus'] ?? '').toString();
-            final materialCompradoBool = (m['materialComprado'] ?? false) == true;
+            final materialCompradoBool =
+                (m['materialComprado'] ?? false) == true;
             final purchaseStatus = () {
               final s = purchaseStatusRaw.trim().toLowerCase();
               if (s.isNotEmpty) return s;
@@ -600,7 +601,8 @@ class _BomScreenState extends State<BomScreen> {
                                         materialLabel: matLabel,
                                         materialColorHex: matColor,
                                         purchaseStatus: p.purchaseStatus,
-                                        materialCompradoFecha: p.materialCompradoFecha,
+                                        materialCompradoFecha:
+                                            p.materialCompradoFecha,
                                         proveedorMostrar: prov,
                                         ref: p.docRef,
                                       );
@@ -622,13 +624,21 @@ class _BomScreenState extends State<BomScreen> {
                                     if (_onlyMaterialPending.value) {
                                       // Solo partes con estatus de compra 'pendiente'
                                       rows.removeWhere(
-                                        (r) => r.purchaseStatus.trim().toLowerCase() != 'pendiente',
+                                        (r) =>
+                                            r.purchaseStatus
+                                                .trim()
+                                                .toLowerCase() !=
+                                            'pendiente',
                                       );
                                     }
                                     if (_onlyPurchasePending.value) {
                                       // Excluir las que ya están en bodega
                                       rows.removeWhere(
-                                        (r) => r.purchaseStatus.trim().toLowerCase() == 'en_bodega',
+                                        (r) =>
+                                            r.purchaseStatus
+                                                .trim()
+                                                .toLowerCase() ==
+                                            'en_bodega',
                                       );
                                     }
 
@@ -1154,7 +1164,9 @@ class _BomScreenState extends State<BomScreen> {
                           'purchaseStatus': status,
                           // compatibilidad con booleano previo
                           'materialComprado': status != 'pendiente',
-                          'materialCompradoFecha': status != 'pendiente' ? fecha : null,
+                          'materialCompradoFecha': status != 'pendiente'
+                              ? fecha
+                              : null,
                         };
 
                         // material
@@ -1190,7 +1202,7 @@ class _BomScreenState extends State<BomScreen> {
                           data['proveedor'] = FieldValue.delete();
                         }
 
-                    await r.ref.update(data);
+                        await r.ref.update(data);
                         try {
                           // Sincroniza operación automática "STOCK"
                           await _syncStockAutoOp(r, status);
@@ -1287,8 +1299,8 @@ extension _BomHelpers on _BomScreenState {
     if (projectRef == null) return;
     final projSnap = await projectRef.get();
     final projData = projSnap.data();
-    final projectName =
-        ((projData == null ? '' : (projData['proyecto'] ?? ''))).toString();
+    final projectName = ((projData == null ? '' : (projData['proyecto'] ?? '')))
+        .toString();
 
     final s = status.trim().toLowerCase();
     if (s == 'pendiente') {
