@@ -91,14 +91,16 @@ class _GanttScreenState extends State<GanttScreen> {
     final map = <String, int>{};
     final res = await FirebaseFirestore.instance
         .collection('operations')
-        .orderBy('order')
+        .orderBy('orden')
         .get();
     for (final d in res.docs) {
       final nombre = (d.data()['nombre'] ?? '').toString().trim().toUpperCase();
-      final order = (d.data()['order'] is int)
-          ? d.data()['order'] as int
-          : int.tryParse('${d.data()['order']}') ?? 9999;
-      if (nombre.isNotEmpty) map[nombre] = order;
+      final orden = (d.data()['orden'] is int)
+          ? d.data()['orden'] as int
+          : int.tryParse('${d.data()['orden']}') ?? 9999;
+      if (nombre.isNotEmpty && nombre != 'RETRABAJO') {
+        map[nombre] = orden;
+      }
     }
     return map;
   }
@@ -240,6 +242,7 @@ class _GanttScreenState extends State<GanttScreen> {
 
                 final opName = (m['operacionNombre'] ?? m['operacion'] ?? '—')
                     .toString();
+                if (opName.trim().toUpperCase() == 'RETRABAJO') continue;
                 final sec = (m['opSecuencia'] ?? 9999) as int;
 
                 // Plan

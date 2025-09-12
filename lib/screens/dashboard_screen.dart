@@ -22,6 +22,7 @@ import 'scrap_screen.dart';
 import 'package:fws_dashboard/screens/requisitions_library_screen.dart';
 import 'scrap_investigations_screen.dart';
 import 'scrap_kpis_screen.dart';
+import 'rework_screen.dart';
 
 // Tabs // lib/screens/dashboard_screen.dart
 import 'production_chart_screen.dart';
@@ -195,6 +196,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => const RequisitionScreen()),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.build_outlined),
+              title: const Text('Retrabajo'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ReworkScreen()),
                 );
               },
             ),

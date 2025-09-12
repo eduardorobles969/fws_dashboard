@@ -1175,7 +1175,10 @@ class _BomScreenState extends State<BomScreen> {
                   const SizedBox(height: 14),
 
                   FilledButton.icon(
-                    onPressed: () async {
+                    onPressed: (status != 'pendiente' &&
+                            (supplierId == null || fecha == null))
+                        ? null
+                        : () async {
                       try {
                         final data = <String, dynamic>{
                           'nestDim': dimCtrl.text.trim(),

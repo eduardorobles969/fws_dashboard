@@ -35,7 +35,10 @@ class OperatorTasksScreen extends StatelessWidget {
 
           // si quieres ocultar finalizadas, filtra aquí:
           final items = docs.where((d) {
-            final s = (d.data()['status'] ?? '').toString().toLowerCase();
+            final m = d.data();
+            final s = (m['status'] ?? '').toString().toLowerCase();
+            final op = (m['operacion'] ?? '').toString().toUpperCase();
+            if (op == 'RETRABAJO') return false;
             return s != 'hecho' && s != 'terminado';
           }).toList();
 
