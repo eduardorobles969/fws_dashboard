@@ -307,7 +307,8 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         final hasDrawingLink =
             (p.drawingLink != null && p.drawingLink!.isNotEmpty);
         final hasSolidLinks = p.solidLinks.isNotEmpty;
-        final hasAttachment = drawingUrl != null ||
+        final hasAttachment =
+            drawingUrl != null ||
             solidUrls.isNotEmpty ||
             hasDrawingLink ||
             hasSolidLinks;
