@@ -75,17 +75,20 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
         .toList();
   }
 
-  Future<Set<String>> _getExistingPartNumbers(String projectId) async {
+  Future<Map<String, DocumentReference>> _getExistingPartRefs(
+      String projectId) async {
     final qs = await FirebaseFirestore.instance
         .collection('projects')
         .doc(projectId)
         .collection('parts')
         .get();
 
-    return qs.docs
-        .map((d) => (d.data()['numeroParte'] ?? '').toString().toUpperCase())
-        .where((s) => s.isNotEmpty)
-        .toSet();
+    final map = <String, DocumentReference>{};
+    for (final d in qs.docs) {
+      final pn = (d.data()['numeroParte'] ?? '').toString().toUpperCase();
+      if (pn.isNotEmpty) map[pn] = d.reference;
+    }
+    return map;
   }
 
   // =================== HELPERS ===================
@@ -213,13 +216,23 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
       final uniqueList = uniqueMap.values.toList();
 
       final existing = _selectedProjectId != null
-          ? await _getExistingPartNumbers(projRef.id)
-          : <String>{};
+          ? await _getExistingPartRefs(projRef.id)
+          : <String, DocumentReference>{};
+      int inserted = 0;
+      int updated = 0;
+
+      String projectName;
+      if (_selectedProjectId == null) {
+        projectName = _proyectoCtrl.text.trim();
+      } else {
+        final projSnap = await projRef.get();
+        final data = projSnap.data() as Map<String, dynamic>?;
+        projectName = (data?['proyecto'] ?? '').toString();
+      }
+
       final toInsert = <_PendingPart>[];
 
       for (final parsed in uniqueList) {
-        if (existing.contains(parsed.pn)) continue;
-
         final row = _rowForPn(parsed.pn);
         final qtyFromRow =
             int.tryParse(row?.cantidadCtrl.text.trim() ?? '') ?? 0;
@@ -236,29 +249,107 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
               .forEach(solidsLinks.add);
         }
 
-        toInsert.add(
-          _PendingPart(
-            pn: parsed.pn,
-            desc: parsed.desc,
-            qty: math.max(0, qty),
-            drawing: row?.drawing,
-            solids: List<PlatformFile>.from(row?.solids ?? const []),
-            nestDim: row?.nestCtrl.text.trim() ?? '',
-            materialDocId: row?.materialDocId,
-            drawingLink: (drawingLink != null && drawingLink.isNotEmpty)
-                ? drawingLink
-                : null,
-            solidLinks: solidsLinks,
-          ),
-        );
+        final hasAnyLink =
+            row?.drawing != null ||
+                (row?.solids.isNotEmpty ?? false) ||
+                (drawingLink != null && drawingLink.isNotEmpty) ||
+                solidsLinks.isNotEmpty;
+
+        if (existing.containsKey(parsed.pn)) {
+          final pRef = existing[parsed.pn]!;
+          final updates = <String, dynamic>{};
+          if (parsed.desc.isNotEmpty) updates['descripcionParte'] = parsed.desc;
+          updates['cantidadPlan'] = math.max(0, qty);
+          final nest = row?.nestCtrl.text.trim() ?? '';
+          if (nest.isNotEmpty) updates['nestDim'] = nest;
+          if (row?.materialDocId != null && row!.materialDocId!.isNotEmpty) {
+            final matRef = FirebaseFirestore.instance
+                .collection('materials')
+                .doc(row.materialDocId);
+            updates['materialRef'] = matRef;
+            final matSnap = await matRef.get();
+            updates['materialCode'] =
+                (matSnap.data()?['code'] ?? '').toString();
+          }
+
+          String? drawingUrl, drawingName;
+          if (row?.drawing != null) {
+            drawingUrl = await _uploadFile(
+              projectId: projRef.id,
+              partDocId: pRef.id,
+              file: row!.drawing!,
+              kind: 'drawing',
+            );
+            drawingName = row.drawing!.name;
+            updates['drawingUrl'] = drawingUrl;
+            updates['drawingName'] = drawingName;
+          }
+
+          final solidUrls = <String>[];
+          final solidNames = <String>[];
+          for (final s in row?.solids ?? const []) {
+            final url = await _uploadFile(
+              projectId: projRef.id,
+              partDocId: pRef.id,
+              file: s,
+              kind: 'solids',
+            );
+            solidUrls.add(url);
+            solidNames.add(s.name);
+          }
+          if (solidUrls.isNotEmpty) {
+            updates['solidUrls'] = solidUrls;
+            updates['solidNames'] = solidNames;
+          }
+          if (drawingLink != null && drawingLink.isNotEmpty) {
+            updates['drawingLink'] = drawingLink;
+          }
+          if (solidsLinks.isNotEmpty) {
+            updates['solidLinkList'] = solidsLinks;
+          }
+
+          if (updates.isNotEmpty) {
+            await pRef.update(updates);
+            if (hasAnyLink) {
+              try {
+                await _upsertAutoOp(
+                  projectRef: projRef,
+                  partRef: pRef,
+                  projectName: projectName,
+                  partNumber: parsed.pn,
+                  opName: 'DIBUJO',
+                  status: 'hecho',
+                );
+              } catch (e) {
+                debugPrint('Auto-op DIBUJO error: $e');
+              }
+            }
+            updated++;
+          }
+        } else {
+          toInsert.add(
+            _PendingPart(
+              pn: parsed.pn,
+              desc: parsed.desc,
+              qty: math.max(0, qty),
+              drawing: row?.drawing,
+              solids: List<PlatformFile>.from(row?.solids ?? const []),
+              nestDim: row?.nestCtrl.text.trim() ?? '',
+              materialDocId: row?.materialDocId,
+              drawingLink: (drawingLink != null && drawingLink.isNotEmpty)
+                  ? drawingLink
+                  : null,
+              solidLinks: solidsLinks,
+            ),
+          );
+        }
       }
 
-      if (toInsert.isEmpty) {
-        _snack('No hay partes nuevas para guardar (todas duplicadas).');
+      if (toInsert.isEmpty && updated == 0) {
+        _snack('No hay partes nuevas para guardar.');
         return;
       }
 
-      int ok = 0;
       for (final p in toInsert) {
         final pRef = projRef.collection('parts').doc();
         final data = <String, dynamic>{
@@ -324,14 +415,6 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
           });
 
           try {
-            String projectName;
-            if (_selectedProjectId == null) {
-              projectName = _proyectoCtrl.text.trim();
-            } else {
-              final projSnap = await projRef.get();
-              final data = projSnap.data() as Map<String, dynamic>?;
-              projectName = (data?['proyecto'] ?? '').toString();
-            }
             await _upsertAutoOp(
               projectRef: projRef,
               partRef: pRef,
@@ -341,15 +424,14 @@ class _NewProjectPartScreenState extends State<NewProjectPartScreen> {
               status: 'hecho',
             );
           } catch (e) {
-            // Si falla el registro automático, no cancelamos el flujo
             debugPrint('Auto-op DIBUJO error: $e');
           }
         }
-        ok++;
+        inserted++;
       }
 
       if (!mounted) return;
-      _snack('Guardadas $ok parte(s).');
+      _snack('Insertadas $inserted, actualizadas $updated.');
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;

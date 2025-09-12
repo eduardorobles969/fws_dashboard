@@ -1,5 +1,6 @@
 ﻿import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class OperatorEditEntryScreen extends StatefulWidget {
   final String docId;
@@ -297,6 +298,7 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
         final status = (d['status'] ?? 'programado').toString();
         final op = (d['operacionNombre'] ?? d['operacion'] ?? '').toString();
         final maq = (d['maquinaNombre'] ?? '').toString();
+        final partRef = d['parteRef'] as DocumentReference?;
 
         if (!_loaded) {
           _plan = (d['cantidad'] ?? 0) is int
@@ -317,151 +319,205 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
           _loaded = true;
         }
 
-        final started = status != 'programado';
-        final finished = status == 'hecho';
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: partRef?.snapshots(),
+          builder: (context, partSnap) {
+            final partData = partSnap.data?.data() ?? {};
+            final drawingUrl =
+                (partData['drawingUrl'] ?? partData['drawingLink'])?.toString();
+            final drawingName =
+                (partData['drawingName'] ?? 'Plano').toString();
+            final List solidUrls =
+                (partData['solidUrls'] as List?)?.map((e) => '$e').toList() ??
+                    const [];
+            final List solidNames =
+                (partData['solidNames'] as List?)?.map((e) => '$e').toList() ??
+                    const [];
+            final List solidLinkList =
+                (partData['solidLinkList'] as List?)
+                        ?.map((e) => '$e')
+                        .toList() ??
+                    const [];
+            final List<String> solidLinks = [
+              ...solidUrls.cast<String>(),
+              ...solidLinkList.cast<String>(),
+            ];
 
-        final enableStart = !started && !finished && !_saving;
-        final enableCounters = started && !finished && !_saving;
-        final enableFinish =
-            started &&
-            !finished &&
-            !_saving &&
-            _sum == _plan &&
-            (_fail == 0 || _failCauseId != null);
+            final started = status != 'programado';
+            final finished = status == 'hecho';
 
-        return Scaffold(
-          appBar: AppBar(title: Text('$proyecto • $parte')),
-          body: AbsorbPointer(
-            absorbing: _saving,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-              children: [
-                Text('Status: $status'),
-                const SizedBox(height: 4),
-                Text('Cantidad plan: $_plan'),
-                if (op.isNotEmpty || maq.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    [
-                      if (op.isNotEmpty) 'Op: $op',
-                      if (maq.isNotEmpty) 'Maq: $maq',
-                    ].join(' • '),
-                    style: const TextStyle(color: Colors.black54),
-                  ),
-                ],
-                const SizedBox(height: 12),
+            final enableStart = !started && !finished && !_saving;
+            final enableCounters = started && !finished && !_saving;
+            final enableFinish =
+                started &&
+                !finished &&
+                !_saving &&
+                _sum == _plan &&
+                (_fail == 0 || _failCauseId != null);
 
-                // Inicio / Fin
-                Row(
+            return Scaffold(
+              appBar: AppBar(title: Text('$proyecto • $parte')),
+              body: AbsorbPointer(
+                absorbing: _saving,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                   children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: enableStart ? _markStart : null,
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Marcar inicio'),
+                    Text('Status: $status'),
+                    const SizedBox(height: 4),
+                    Text('Cantidad plan: $_plan'),
+                    if (op.isNotEmpty || maq.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        [
+                          if (op.isNotEmpty) 'Op: $op',
+                          if (maq.isNotEmpty) 'Maq: $maq',
+                        ].join(' • '),
+                        style: const TextStyle(color: Colors.black54),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: enableFinish ? _markFinish : null,
-                        icon: const Icon(Icons.stop),
-                        label: const Text('Marcar fin'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: enableFinish
-                              ? Colors.green
-                              : Colors.grey,
+                    ],
+                    if ((drawingUrl != null && drawingUrl.isNotEmpty) ||
+                        solidLinks.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Documentos',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 6),
+                      if (drawingUrl != null && drawingUrl.isNotEmpty)
+                        TextButton.icon(
+                          onPressed: () => launchUrl(Uri.parse(drawingUrl)),
+                          icon: const Icon(Icons.picture_as_pdf_outlined),
+                          label: Text(
+                              drawingName.isEmpty ? 'Plano' : drawingName),
                         ),
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 14),
-
-                // PASS
-                _qtyCard(
-                  title: 'Pass',
-                  value: _pass,
-                  onMinus: () => _decPass(enableCounters),
-                  onPlus: () => _incPass(enableCounters),
-                  enabled: enableCounters,
-                ),
-
-                const SizedBox(height: 12),
-
-                // FAIL
-                _qtyCard(
-                  title: 'Fail',
-                  value: _fail,
-                  onMinus: () => _decFail(enableCounters),
-                  onPlus: () => _incFail(enableCounters),
-                  enabled: enableCounters,
-                  extra: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 10),
-                      OutlinedButton.icon(
-                        onPressed: enableCounters
-                            ? () async {
-                                final picked = await _pickFailCause();
-                                if (picked != null) {
-                                  setState(() {
-                                    _failCauseId = picked['id'];
-                                    _failCauseName = picked['name'];
-                                  });
-                                }
-                              }
-                            : null,
-                        icon: const Icon(Icons.rule_folder_outlined),
-                        label: Text(
-                          _failCauseName == null
-                              ? 'Elegir CAUSA de FAIL'
-                              : 'Causa seleccionada: $_failCauseName',
-                        ),
-                      ),
-                      if (enableCounters && _fail > 0 && _failCauseId == null)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 6),
-                          child: Text(
-                            'Requerido: selecciona la causa de FAIL.',
-                            style: TextStyle(color: Colors.red),
+                      for (int i = 0; i < solidLinks.length; i++)
+                        TextButton.icon(
+                          onPressed: () => launchUrl(Uri.parse(solidLinks[i])),
+                          icon: const Icon(Icons.view_in_ar_outlined),
+                          label: Text(
+                            (i < solidNames.length && solidNames[i].isNotEmpty)
+                                ? solidNames[i]
+                                : 'Sólido ${i + 1}',
                           ),
                         ),
                     ],
-                  ),
-                ),
+                    const SizedBox(height: 12),
 
-                const SizedBox(height: 14),
-
-                // Guía / suma
-                Row(
-                  children: [
-                    Text(
-                      'Suma actual: $_sum / $_plan',
-                      style: const TextStyle(color: Colors.black54),
+                    // Inicio / Fin
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: enableStart ? _markStart : null,
+                            icon: const Icon(Icons.play_arrow),
+                            label: const Text('Marcar inicio'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: enableFinish ? _markFinish : null,
+                            icon: const Icon(Icons.stop),
+                            label: const Text('Marcar fin'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: enableFinish
+                                  ? Colors.green
+                                  : Colors.grey,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const Spacer(),
-                    if (!enableFinish && started && !finished)
-                      const Text(
-                        'Completa PASS/FAIL (y causa) para cerrar',
-                        style: TextStyle(color: Colors.black45, fontSize: 12),
+
+                    const SizedBox(height: 14),
+
+                    // PASS
+                    _qtyCard(
+                      title: 'Pass',
+                      value: _pass,
+                      onMinus: () => _decPass(enableCounters),
+                      onPlus: () => _incPass(enableCounters),
+                      enabled: enableCounters,
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // FAIL
+                    _qtyCard(
+                      title: 'Fail',
+                      value: _fail,
+                      onMinus: () => _decFail(enableCounters),
+                      onPlus: () => _incFail(enableCounters),
+                      enabled: enableCounters,
+                      extra: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 10),
+                          OutlinedButton.icon(
+                            onPressed: enableCounters
+                                ? () async {
+                                    final picked = await _pickFailCause();
+                                    if (picked != null) {
+                                      setState(() {
+                                        _failCauseId = picked['id'];
+                                        _failCauseName = picked['name'];
+                                      });
+                                    }
+                                  }
+                                : null,
+                            icon: const Icon(Icons.rule_folder_outlined),
+                            label: Text(
+                              _failCauseName == null
+                                  ? 'Elegir CAUSA de FAIL'
+                                  : 'Causa seleccionada: $_failCauseName',
+                            ),
+                          ),
+                          if (enableCounters && _fail > 0 && _failCauseId == null)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 6),
+                              child: Text(
+                                'Requerido: selecciona la causa de FAIL.',
+                                style: TextStyle(color: Colors.red),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: 14),
+
+                    // Guía / suma
+                    Row(
+                      children: [
+                        Text(
+                          'Suma actual: $_sum / $_plan',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                        const Spacer(),
+                        if (!enableFinish && started && !finished)
+                          const Text(
+                            'Completa PASS/FAIL (y causa) para cerrar',
+                            style:
+                                TextStyle(color: Colors.black45, fontSize: 12),
+                          ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // --------- BOTÓN REPORTAR SCRAP (independiente) ----------
+                    if (started && !finished)
+                      FilledButton.icon(
+                        onPressed: _saving ? null : _reportScrapDialog,
+                        icon:
+                            const Icon(Icons.report_gmailerrorred_outlined),
+                        label: const Text('Reportar scrap'),
                       ),
                   ],
                 ),
-
-                const SizedBox(height: 16),
-
-                // --------- BOTÓN REPORTAR SCRAP (independiente) ----------
-                if (started && !finished)
-                  FilledButton.icon(
-                    onPressed: _saving ? null : _reportScrapDialog,
-                    icon: const Icon(Icons.report_gmailerrorred_outlined),
-                    label: const Text('Reportar scrap'),
-                  ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );

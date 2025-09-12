@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class BomScreen extends StatefulWidget {
   const BomScreen({super.key});
@@ -147,6 +148,21 @@ class _BomScreenState extends State<BomScreen> {
                   ? m['supplierRef']
                   : null,
               nestGroup: (m['nestGroup'] ?? '').toString(),
+              drawingUrl: (m['drawingUrl'] ?? '')?.toString(),
+              drawingName: (m['drawingName'] ?? '')?.toString(),
+              drawingLink: (m['drawingLink'] ?? '')?.toString(),
+              solidUrls: (m['solidUrls'] as List?)
+                      ?.map((e) => '$e')
+                      .toList() ??
+                  const [],
+              solidNames: (m['solidNames'] as List?)
+                      ?.map((e) => '$e')
+                      .toList() ??
+                  const [],
+              solidLinkList: (m['solidLinkList'] as List?)
+                      ?.map((e) => '$e')
+                      .toList() ??
+                  const [],
               docRef: d.reference,
             );
           }).toList();
@@ -610,6 +626,16 @@ class _BomScreenState extends State<BomScreen> {
                                         materialCompradoFecha:
                                             p.materialCompradoFecha,
                                         proveedorMostrar: prov,
+                                        drawingUrl: p.drawingUrl?.isNotEmpty == true
+                                            ? p.drawingUrl
+                                            : (p.drawingLink?.isNotEmpty == true
+                                                ? p.drawingLink
+                                                : null),
+                                        drawingName: p.drawingName,
+                                        drawingLink: p.drawingLink,
+                                        solidUrls: p.solidUrls,
+                                        solidNames: p.solidNames,
+                                        solidLinkList: p.solidLinkList,
                                         ref: p.docRef,
                                       );
                                     }).toList();
@@ -881,6 +907,11 @@ class _BomScreenState extends State<BomScreen> {
   Widget _itemCard(_BomRow r, List<_MaterialDoc> mats) {
     final isSelected = _selected.contains(r.id);
     final Color? materialColor = _parseColorHex(r.materialColorHex);
+    final solidLinks = [...r.solidUrls, ...r.solidLinkList];
+    final solidNames = [
+      ...r.solidNames,
+      ...List.filled(r.solidLinkList.length, ''),
+    ];
 
     return Card(
       margin: EdgeInsets.zero,
@@ -1009,6 +1040,41 @@ class _BomScreenState extends State<BomScreen> {
                       'Dimensión: ${r.nestDim}',
                       style: const TextStyle(color: Colors.black87),
                     ),
+                  if ((r.drawingUrl != null && r.drawingUrl!.isNotEmpty) ||
+                      solidLinks.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (r.drawingUrl != null && r.drawingUrl!.isNotEmpty)
+                          OutlinedButton.icon(
+                            onPressed: () =>
+                                launchUrl(Uri.parse(r.drawingUrl!)),
+                            icon:
+                                const Icon(Icons.picture_as_pdf_outlined),
+                            label: Text(
+                              r.drawingName != null &&
+                                      r.drawingName!.isNotEmpty
+                                  ? r.drawingName!
+                                  : 'Plano',
+                            ),
+                          ),
+                        for (int i = 0; i < solidLinks.length; i++)
+                          OutlinedButton.icon(
+                            onPressed: () =>
+                                launchUrl(Uri.parse(solidLinks[i])),
+                            icon: const Icon(Icons.view_in_ar_outlined),
+                            label: Text(
+                              (i < solidNames.length &&
+                                      solidNames[i].isNotEmpty)
+                                  ? solidNames[i]
+                                  : 'Sólido ${i + 1}',
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1561,6 +1627,12 @@ class _PartDoc {
   final String proveedorTexto;
   final DocumentReference? supplierRef;
   final String nestGroup;
+  final String? drawingUrl;
+  final String? drawingName;
+  final String? drawingLink;
+  final List<String> solidUrls;
+  final List<String> solidNames;
+  final List<String> solidLinkList;
   final DocumentReference docRef;
 
   _PartDoc({
@@ -1576,6 +1648,12 @@ class _PartDoc {
     required this.proveedorTexto,
     required this.supplierRef,
     required this.nestGroup,
+    this.drawingUrl,
+    this.drawingName,
+    this.drawingLink,
+    required this.solidUrls,
+    required this.solidNames,
+    required this.solidLinkList,
     required this.docRef,
   });
 }
@@ -1593,6 +1671,12 @@ class _BomRow {
   final String purchaseStatus;
   final Timestamp? materialCompradoFecha;
   final String proveedorMostrar;
+  final String? drawingUrl;
+  final String? drawingName;
+  final String? drawingLink;
+  final List<String> solidUrls;
+  final List<String> solidNames;
+  final List<String> solidLinkList;
   final DocumentReference ref;
 
   _BomRow({
@@ -1608,6 +1692,12 @@ class _BomRow {
     required this.purchaseStatus,
     required this.materialCompradoFecha,
     required this.proveedorMostrar,
+    this.drawingUrl,
+    this.drawingName,
+    this.drawingLink,
+    required this.solidUrls,
+    required this.solidNames,
+    required this.solidLinkList,
     required this.ref,
   });
 }
