@@ -50,6 +50,8 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
   bool _saving = false;
   bool _multiMode = true;
 
+  int _maxQty = 0;
+
   @override
   void initState() {
     super.initState();
@@ -101,6 +103,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
               if (n == 'DIBUJO') return false;
               if (n == 'STOCK' || n == 'ALMACEN' || n == 'ALMACÉN')
                 return false;
+              if (n == 'RETRABAJO') return false;
               return true;
             })
             .toList()
@@ -237,6 +240,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
     if (!mounted) return;
     setState(() {
       _cantidadSugeridaCtrl.text = faltante.toString();
+      _maxQty = faltante;
     });
   }
 
@@ -270,6 +274,14 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
       if (!anyValid) {
         _snack(
           'La operación "[${op.order}] ${op.nombre}" requiere al menos una asignación válida.',
+        );
+        return;
+      }
+
+      final totalQty = assigns.fold<int>(0, (p, a) => p + a.qty);
+      if (totalQty > _maxQty) {
+        _snack(
+          'La cantidad para "[${op.order}] ${op.nombre}" excede el máximo ($_maxQty).',
         );
         return;
       }
