@@ -34,6 +34,8 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
 
   String? _projectId, _projectName;
   String? _partId, _partNumber;
+  int? _planDeclarado;
+  int? _cantidadAcumulada;
 
   List<_OpMeta> _ops = [];
   List<Map<String, String>> _machines = [];
@@ -185,7 +187,7 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
         });
   }
 
-  // ====== BOM faltante (plan - producido) ======
+  // ====== Actividad acumulada del número de parte ======
 
   Future<int> _producedForPart({
     required String projectId,
@@ -226,17 +228,21 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
     final plan =
         ((partMap == null ? 0 : (partMap['cantidadPlan'] ?? 0)) as int);
 
-    // Suma producido del P/N
+    // Suma actividades registradas (solo informativo)
     final produced = await _producedForPart(
       projectId: _projectId!,
       partId: _partId!,
     );
 
-    final faltante = max(0, plan - produced);
-
     if (!mounted) return;
     setState(() {
-      _cantidadSugeridaCtrl.text = faltante.toString();
+      _planDeclarado = plan;
+      _cantidadAcumulada = produced;
+      if (plan > 0) {
+        _cantidadSugeridaCtrl.text = plan.toString();
+      } else {
+        _cantidadSugeridaCtrl.clear();
+      }
     });
   }
 
@@ -418,6 +424,8 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                             _partNumber = null;
                             _descripcionParteCtrl.clear();
                             _cantidadSugeridaCtrl.clear();
+                            _planDeclarado = null;
+                            _cantidadAcumulada = null;
                           });
                         },
                         validator: (v) =>
@@ -454,8 +462,10 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                                 _partNumber = sel['numeroParte'] as String;
                                 _descripcionParteCtrl.text =
                                     (sel['descripcionParte'] as String?) ?? '';
+                                _planDeclarado = null;
+                                _cantidadAcumulada = null;
                               });
-                              // Sugerir cantidad (BOM faltante)
+                              // Cargar cantidad sugerida desde el plan
                               await _loadSuggestedQty();
                             },
                             validator: (v) => _projectId == null
@@ -623,13 +633,33 @@ class _AddProductionEntryScreenState extends State<AddProductionEntryScreen> {
                       ),
 
                       const SizedBox(height: 12),
+                      if (_planDeclarado != null)
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.only(bottom: 4),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.deepPurple.withOpacity(0.06),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            [
+                              'Plan del diseñador: ${_planDeclarado ?? 0} pieza(s).',
+                              if (_cantidadAcumulada != null)
+                                'Actividades registradas acumuladas: ${_cantidadAcumulada!}.',
+                              'Este dato es informativo; programa las operaciones que necesites.',
+                            ].join('\n'),
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ),
                       TextFormField(
                         controller: _cantidadSugeridaCtrl,
                         keyboardType: TextInputType.number,
                         decoration: const InputDecoration(
                           labelText: 'Cantidad sugerida (opcional)',
                           helperText:
-                              'Tip: usa este valor como guía y reparte cantidades por operador dentro de cada operación.',
+                              'Usa este valor como guía para repartir cantidades por operador. '
+                              'Puedes ajustarlo sin afectar el plan original.',
                           border: OutlineInputBorder(),
                         ),
                       ),
