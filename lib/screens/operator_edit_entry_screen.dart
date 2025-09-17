@@ -1,5 +1,7 @@
-﻿import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class OperatorEditEntryScreen extends StatefulWidget {
   final String docId;
@@ -11,6 +13,8 @@ class OperatorEditEntryScreen extends StatefulWidget {
 }
 
 class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
+  final DateFormat _dateFmt = DateFormat('dd/MM/yyyy HH:mm');
+
   bool _saving = false;
   bool _loaded = false;
 
@@ -20,6 +24,11 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
 
   String? _failCauseId;
   String? _failCauseName;
+
+  DocumentReference<Object?>? _currentPartRef;
+  List<_Attachment> _attachments = const [];
+  bool _loadingAttachments = false;
+  String? _attachmentsError;
 
   DocumentReference<Map<String, dynamic>> get _ref => FirebaseFirestore.instance
       .collection('production_daily')
@@ -113,7 +122,8 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
   // ---------- Inicio / Fin ----------
   Future<void> _markStart() async {
     setState(() => _saving = true);
-    try {      try {
+    try {
+      try {
         await _ref.update({
           'inicio': FieldValue.serverTimestamp(),
           'status': 'en_proceso',
@@ -129,7 +139,7 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
           throw e;
         }
       }
-      
+
       _toast('Inicio registrado');
     } catch (e) {
       _toast('Error: $e');
@@ -149,7 +159,8 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
     }
 
     setState(() => _saving = true);
-    try {      try {
+    try {
+      try {
         await _ref.update({
           'pass': _pass,
           'fail': _fail,
@@ -173,12 +184,145 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
           throw e;
         }
       }
-      
+
       _toast('Orden finalizada');
     } catch (e) {
       _toast('Error: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  String? _formatTimestamp(dynamic value) {
+    if (value is Timestamp) {
+      return _dateFmt.format(value.toDate());
+    }
+    if (value is DateTime) {
+      return _dateFmt.format(value);
+    }
+    if (value is String && value.isNotEmpty) {
+      final parsed = DateTime.tryParse(value);
+      if (parsed != null) {
+        return _dateFmt.format(parsed);
+      }
+    }
+    return null;
+  }
+
+  void _maybeLoadPartFiles(dynamic partRefRaw) {
+    if (partRefRaw is! DocumentReference) {
+      return;
+    }
+    if (_currentPartRef != null && _currentPartRef!.path == partRefRaw.path) {
+      if (_attachments.isEmpty &&
+          !_loadingAttachments &&
+          _attachmentsError != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _loadPartFiles(_currentPartRef!);
+        });
+      }
+      return;
+    }
+    _currentPartRef = partRefRaw;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadPartFiles(partRefRaw);
+    });
+  }
+
+  Future<void> _loadPartFiles(DocumentReference<Object?> partRef) async {
+    if (!mounted) return;
+    setState(() {
+      _loadingAttachments = true;
+      _attachmentsError = null;
+      _attachments = const [];
+    });
+    try {
+      final snap = await partRef.get();
+      final data = snap.data();
+      if (!mounted) return;
+      if (data is! Map<String, dynamic>) {
+        setState(() {
+          _loadingAttachments = false;
+        });
+        return;
+      }
+
+      final attachments = <_Attachment>[];
+
+      final drawingUrl = data['drawingUrl'];
+      if (drawingUrl is String && drawingUrl.isNotEmpty) {
+        final rawName = data['drawingName'];
+        final label = (rawName is String && rawName.isNotEmpty)
+            ? rawName
+            : 'Plano';
+        attachments.add(_Attachment(label: label, url: drawingUrl));
+      }
+
+      final drawingLink = data['drawingLink'];
+      if (drawingLink is String && drawingLink.isNotEmpty) {
+        attachments.add(_Attachment(label: 'Plano (enlace)', url: drawingLink));
+      }
+
+      final solidUrls = data['solidUrls'];
+      final solidNames = data['solidNames'];
+      if (solidUrls is List) {
+        for (var i = 0; i < solidUrls.length; i++) {
+          final url = solidUrls[i];
+          if (url is! String || url.isEmpty) continue;
+          String label = 'Sólido ${i + 1}';
+          if (solidNames is List && i < solidNames.length) {
+            final name = solidNames[i];
+            if (name is String && name.isNotEmpty) {
+              label = name;
+            }
+          }
+          attachments.add(_Attachment(label: label, url: url));
+        }
+      }
+
+      final solidLinks = data['solidLinkList'];
+      if (solidLinks is List) {
+        for (var i = 0; i < solidLinks.length; i++) {
+          final link = solidLinks[i];
+          if (link is! String || link.isEmpty) continue;
+          attachments.add(
+            _Attachment(label: 'Sólido (enlace ${i + 1})', url: link),
+          );
+        }
+      }
+
+      setState(() {
+        _attachments = attachments;
+        _loadingAttachments = false;
+        _attachmentsError = null;
+      });
+    } catch (e) {
+      debugPrint('Error loading part files: $e');
+      if (!mounted) return;
+      setState(() {
+        _attachments = const [];
+        _loadingAttachments = false;
+        _attachmentsError = 'No se pudieron cargar los archivos.';
+      });
+    }
+  }
+
+  Future<void> _openAttachment(_Attachment att) async {
+    final uri = Uri.tryParse(att.url);
+    if (uri == null) {
+      _toast('URL inválida.');
+      return;
+    }
+    try {
+      final bool launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        _toast('No se pudo abrir el archivo.');
+      }
+    } catch (e) {
+      _toast('No se pudo abrir el archivo.');
     }
   }
 
@@ -297,6 +441,8 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
         final status = (d['status'] ?? 'programado').toString();
         final op = (d['operacionNombre'] ?? d['operacion'] ?? '').toString();
         final maq = (d['maquinaNombre'] ?? '').toString();
+        final inicioLabel = _formatTimestamp(d['inicio']);
+        final finLabel = _formatTimestamp(d['fin']);
 
         if (!_loaded) {
           _plan = (d['cantidad'] ?? 0) is int
@@ -320,6 +466,10 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
         final started = status != 'programado';
         final finished = status == 'hecho';
 
+        if (!started) {
+          _maybeLoadPartFiles(d['parteRef']);
+        }
+
         final enableStart = !started && !finished && !_saving;
         final enableCounters = started && !finished && !_saving;
         final enableFinish =
@@ -339,6 +489,15 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
                 Text('Status: $status'),
                 const SizedBox(height: 4),
                 Text('Cantidad plan: $_plan'),
+                const SizedBox(height: 4),
+                Text(
+                  'Inicio registrado: ${inicioLabel ?? 'Pendiente'}',
+                  style: const TextStyle(color: Colors.black87),
+                ),
+                Text(
+                  'Fin registrado: ${finLabel ?? 'Pendiente'}',
+                  style: const TextStyle(color: Colors.black87),
+                ),
                 if (op.isNotEmpty || maq.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Text(
@@ -350,6 +509,74 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
                   ),
                 ],
                 const SizedBox(height: 12),
+
+                if (!started) ...[
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Archivos del proyecto',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          if (_loadingAttachments)
+                            const Center(
+                              child: Padding(
+                                padding: EdgeInsets.symmetric(vertical: 12),
+                                child: CircularProgressIndicator(),
+                              ),
+                            )
+                          else if (_attachmentsError != null) ...[
+                            Text(
+                              _attachmentsError!,
+                              style: const TextStyle(color: Colors.red),
+                            ),
+                            if (_currentPartRef != null)
+                              Align(
+                                alignment: Alignment.centerLeft,
+                                child: TextButton.icon(
+                                  onPressed: _loadingAttachments
+                                      ? null
+                                      : () => _loadPartFiles(_currentPartRef!),
+                                  icon: const Icon(Icons.refresh),
+                                  label: const Text('Reintentar'),
+                                ),
+                              ),
+                          ] else if (_attachments.isEmpty)
+                            const Text('No hay archivos adjuntos.'),
+                          if (_attachments.isNotEmpty)
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: _attachments
+                                  .map(
+                                    (att) => ActionChip(
+                                      label: Text(att.label),
+                                      onPressed: () => _openAttachment(att),
+                                    ),
+                                  )
+                                  .toList(),
+                            ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Los archivos dejarán de mostrarse una vez que inicies la actividad.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
 
                 // Inicio / Fin
                 Row(
@@ -509,4 +736,11 @@ class _OperatorEditEntryScreenState extends State<OperatorEditEntryScreen> {
       ),
     );
   }
+}
+
+class _Attachment {
+  final String label;
+  final String url;
+
+  const _Attachment({required this.label, required this.url});
 }

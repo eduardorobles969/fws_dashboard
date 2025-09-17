@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import 'operator_edit_entry_screen.dart';
 
@@ -46,24 +47,65 @@ class OperatorTasksScreen extends StatelessWidget {
             return const Center(child: Text('No hay órdenes pendientes.'));
           }
 
+          final dateFmt = DateFormat('dd/MM/yyyy HH:mm');
+
+          String _formatTs(dynamic value) {
+            if (value is Timestamp) {
+              return dateFmt.format(value.toDate());
+            }
+            if (value is DateTime) {
+              return dateFmt.format(value);
+            }
+            if (value is String && value.isNotEmpty) {
+              final parsed = DateTime.tryParse(value);
+              if (parsed != null) {
+                return dateFmt.format(parsed);
+              }
+            }
+            return '—';
+          }
+
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (_, i) {
+            itemBuilder: (itemContext, i) {
               final d = items[i].data();
               final id = items[i].id;
               final proyecto = (d['proyecto'] ?? '—').toString();
               final parte = (d['numeroParte'] ?? '—').toString();
               final op = (d['operacion'] ?? '—').toString();
               final status = (d['status'] ?? 'programado').toString();
+              final inicioLabel = _formatTs(d['inicio']);
+              final finLabel = _formatTs(d['fin']);
 
               return ListTile(
                 title: Text('$proyecto • $parte'),
-                subtitle: Text('Operación: $op  •  Status: $status'),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Operación: $op  •  Status: $status'),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Inicio: $inicioLabel',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    Text(
+                      'Fin: $finLabel',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  ],
+                ),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  Navigator.push(
-                    context,
+                  final navigator = Navigator.of(itemContext);
+                  if (!navigator.mounted) return;
+                  navigator.push(
                     MaterialPageRoute(
                       builder: (_) => OperatorEditEntryScreen(docId: id),
                     ),

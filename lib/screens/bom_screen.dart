@@ -1112,12 +1112,25 @@ class _BomScreenState extends State<BomScreen> {
                     value: status,
                     isExpanded: true,
                     items: const [
-                      DropdownMenuItem(value: 'pendiente', child: Text('Pendiente')),
-                      DropdownMenuItem(value: 'comprado', child: Text('Comprado')),
-                      DropdownMenuItem(value: 'en_camino', child: Text('En camino')),
-                      DropdownMenuItem(value: 'en_bodega', child: Text('En bodega')),
+                      DropdownMenuItem(
+                        value: 'pendiente',
+                        child: Text('Pendiente'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'comprado',
+                        child: Text('Comprado'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'en_camino',
+                        child: Text('En camino'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'en_bodega',
+                        child: Text('En bodega'),
+                      ),
                     ],
-                    onChanged: (v) => setState(() => status = (v ?? 'pendiente')),
+                    onChanged: (v) =>
+                        setState(() => status = (v ?? 'pendiente')),
                     decoration: const InputDecoration(
                       labelText: 'Estatus de compra',
                       border: OutlineInputBorder(),
@@ -1152,8 +1165,8 @@ class _BomScreenState extends State<BomScreen> {
                         final lbl = status == 'en_bodega'
                             ? 'Fecha de recepción'
                             : (status == 'en_camino'
-                                ? 'Fecha de envío'
-                                : 'Fecha de compra');
+                                  ? 'Fecha de envío'
+                                  : 'Fecha de compra');
                         if (fecha == null) return '$lbl: (toca para elegir)';
                         return '$lbl: ${DateFormat('yyyy-MM-dd').format(fecha!.toDate())}';
                       }()),
@@ -1175,67 +1188,73 @@ class _BomScreenState extends State<BomScreen> {
                   const SizedBox(height: 14),
 
                   FilledButton.icon(
-                    onPressed: (status != 'pendiente' &&
+                    onPressed:
+                        (status != 'pendiente' &&
                             (supplierId == null || fecha == null))
                         ? null
                         : () async {
-                      try {
-                        final data = <String, dynamic>{
-                          'nestDim': dimCtrl.text.trim(),
-                          'purchaseStatus': status,
-                          // compatibilidad con booleano previo
-                          'materialComprado': status != 'pendiente',
-                          'materialCompradoFecha': status != 'pendiente'
-                              ? fecha
-                              : null,
-                        };
+                            try {
+                              final data = <String, dynamic>{
+                                'nestDim': dimCtrl.text.trim(),
+                                'purchaseStatus': status,
+                                // compatibilidad con booleano previo
+                                'materialComprado': status != 'pendiente',
+                                'materialCompradoFecha': status != 'pendiente'
+                                    ? fecha
+                                    : null,
+                              };
 
-                        // material
-                        if (materialId == null) {
-                          data['materialRef'] = FieldValue.delete();
-                          data['materialCode'] = FieldValue.delete();
-                        } else {
-                          final matRef = FirebaseFirestore.instance
-                              .collection('materials')
-                              .doc(materialId);
-                          final matSnap = await matRef.get();
-                          data['materialRef'] = matRef;
-                          final matData = matSnap.data();
-                          data['materialCode'] =
-                              ((matData == null ? '' : (matData['code'] ?? '')))
-                                  .toString();
-                        }
+                              // material
+                              if (materialId == null) {
+                                data['materialRef'] = FieldValue.delete();
+                                data['materialCode'] = FieldValue.delete();
+                              } else {
+                                final matRef = FirebaseFirestore.instance
+                                    .collection('materials')
+                                    .doc(materialId);
+                                final matSnap = await matRef.get();
+                                data['materialRef'] = matRef;
+                                final matData = matSnap.data();
+                                data['materialCode'] =
+                                    ((matData == null
+                                            ? ''
+                                            : (matData['code'] ?? '')))
+                                        .toString();
+                              }
 
-                        // proveedor (sólo si comprado)
-                        if (status != 'pendiente' && supplierId != null) {
-                          final supRef = FirebaseFirestore.instance
-                              .collection('suppliers')
-                              .doc(supplierId);
-                          final supSnap = await supRef.get();
-                          final supData = supSnap.data();
-                          final supName =
-                              ((supData == null ? '' : (supData['name'] ?? '')))
-                                  .toString();
-                          data['supplierRef'] = supRef;
-                          data['proveedor'] = supName; // opcional, fácil export
-                        } else {
-                          data['supplierRef'] = FieldValue.delete();
-                          data['proveedor'] = FieldValue.delete();
-                        }
+                              // proveedor (sólo si comprado)
+                              if (status != 'pendiente' && supplierId != null) {
+                                final supRef = FirebaseFirestore.instance
+                                    .collection('suppliers')
+                                    .doc(supplierId);
+                                final supSnap = await supRef.get();
+                                final supData = supSnap.data();
+                                final supName =
+                                    ((supData == null
+                                            ? ''
+                                            : (supData['name'] ?? '')))
+                                        .toString();
+                                data['supplierRef'] = supRef;
+                                data['proveedor'] =
+                                    supName; // opcional, fácil export
+                              } else {
+                                data['supplierRef'] = FieldValue.delete();
+                                data['proveedor'] = FieldValue.delete();
+                              }
 
-                        await r.ref.update(data);
-                        try {
-                          // Sincroniza operación automática "STOCK"
-                          await _syncStockAutoOp(r, status);
-                        } catch (_) {}
-                        if (mounted) Navigator.pop(ctx);
-                      } catch (e) {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Error al guardar: $e')),
-                        );
-                      }
-                    },
+                              await r.ref.update(data);
+                              try {
+                                // Sincroniza operación automática "STOCK"
+                                await _syncStockAutoOp(r, status);
+                              } catch (_) {}
+                              if (mounted) Navigator.pop(ctx);
+                            } catch (e) {
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Error al guardar: $e')),
+                              );
+                            }
+                          },
                     icon: const Icon(Icons.save),
                     label: const Text('Guardar'),
                   ),
@@ -1339,10 +1358,12 @@ extension _BomHelpers on _BomScreenState {
                 value: bodegaId,
                 isExpanded: true,
                 items: bodegas
-                    .map((b) => DropdownMenuItem<String>(
-                          value: b['id'] as String,
-                          child: Text(b['nombre'] as String),
-                        ))
+                    .map(
+                      (b) => DropdownMenuItem<String>(
+                        value: b['id'] as String,
+                        child: Text(b['nombre'] as String),
+                      ),
+                    )
                     .toList(),
                 onChanged: (v) => bodegaId = v,
                 decoration: const InputDecoration(
@@ -1388,8 +1409,8 @@ extension _BomHelpers on _BomScreenState {
 
       await _warehouseIn(
         bodegaId: bodegaId!,
-        bodegaNombre: bodegas.firstWhere((b) => b['id'] == bodegaId)['nombre']
-            as String,
+        bodegaNombre:
+            bodegas.firstWhere((b) => b['id'] == bodegaId)['nombre'] as String,
         partRef: r.ref,
         numeroParte: r.numero,
         qty: qty,
@@ -1422,8 +1443,10 @@ extension _BomHelpers on _BomScreenState {
       int currentQty = 0;
       if (stockSnap.exists) {
         final m = stockSnap.data() as Map<String, dynamic>;
-        currentQty = (m['qty'] as num?)?.toInt() ??
-            int.tryParse('${m['qty'] ?? 0}') ?? 0;
+        currentQty =
+            (m['qty'] as num?)?.toInt() ??
+            int.tryParse('${m['qty'] ?? 0}') ??
+            0;
       }
       final newQty = currentQty + qty;
 
@@ -1455,6 +1478,7 @@ extension _BomHelpers on _BomScreenState {
       });
     });
   }
+
   Future<void> _syncStockAutoOp(_BomRow r, String status) async {
     final partRef = r.ref;
     final projectRef = partRef.parent.parent; // /projects/{id}
